@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import tempfile
 import threading
+import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 
 import lzh
 
@@ -44,8 +48,14 @@ PREV_SEARCH_DAYS = 60  # 前節を探しにいく最大日数
 
 # ---------------------------------------------------------------- 取得 ----
 
+_SESSION = requests.Session()
+_SESSION.headers.update(UA)
+_SESSION.mount("https://", HTTPAdapter(pool_connections=8, pool_maxsize=32, max_retries=1))
+TIMEOUT = (6, 25)  # (接続, 読み込み) 秒
+
+
 def http_get(url: str) -> requests.Response:
-    r = requests.get(url, headers=UA, timeout=20)
+    r = _SESSION.get(url, timeout=TIMEOUT)
     r.raise_for_status()
     return r
 
@@ -72,7 +82,7 @@ def fetch_k_text(day: dt.date) -> Optional[str]:
     """日別の競走成績ファイルを取得して展開する. 無ければ None."""
     url = f"https://www1.mbrace.or.jp/od2/K/{day:%Y%m}/k{day:%y%m%d}.lzh"
     try:
-        r = requests.get(url, headers=UA, timeout=20)
+        r = _SESSION.get(url, timeout=TIMEOUT)
     except requests.RequestException:
         return None
     if r.status_code != 200 or b"-lh" not in r.content[:10]:
@@ -88,11 +98,28 @@ _K_LOCK = threading.Lock()
 _K_CACHE_MAX = 150
 
 
+_K_DIR = Path(tempfile.gettempdir()) / "boatdx_k"
+
+
 def load_k_cached(day: dt.date) -> Optional[str]:
-    """Kファイルをプロセス内でキャッシュして返す (取得できなかった日はキャッシュしない)."""
+    """Kファイルをメモリとディスクにキャッシュして返す (取得できなかった日はキャッシュしない)."""
     if day in _K_CACHE:
         return _K_CACHE[day]
-    text = fetch_k_text(day)
+    path = _K_DIR / f"K{day:%y%m%d}.txt"
+    text = None
+    if path.exists():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = None
+    if text is None:
+        text = fetch_k_text(day)
+        if text is not None:
+            try:
+                _K_DIR.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            except OSError:
+                pass
     if text is not None:
         with _K_LOCK:
             if len(_K_CACHE) >= _K_CACHE_MAX:
@@ -357,27 +384,37 @@ class KStore:
     def __init__(self, loader: Callable[[dt.date], Optional[str]] = load_k_cached):
         self.loader = loader
         self.cache: dict[dt.date, dict[str, list[KEntry]]] = {}
+        self.missing: set[dt.date] = set()  # データを取れなかった日
 
-    def prefetch(self, days: list[dt.date], workers: int = 8) -> None:
+    def prefetch(self, days: list[dt.date], workers: int = 16) -> None:
         """まとめて並列取得しておく (前節検索を速くするため)."""
-        todo = [d for d in days if d not in self.cache]
+        todo = [d for d in dict.fromkeys(days) if d not in self.cache]
+        if not todo:
+            return
         with ThreadPoolExecutor(max_workers=workers) as ex:
             texts = list(ex.map(self.loader, todo))
         for d, text in zip(todo, texts):
             self.cache[d] = parse_k(text, d) if text else {}
+            if not text:
+                self.missing.add(d)
 
     def get(self, day: dt.date) -> dict[str, list[KEntry]]:
         if day not in self.cache:
             text = self.loader(day)
             self.cache[day] = parse_k(text, day) if text else {}
+            if not text:
+                self.missing.add(day)
         return self.cache[day]
 
 
-def find_prev_series(toban: str, before: dt.date, store: KStore) -> Series:
-    """before より前で、その選手が最後に走った節を返す."""
+def find_prev_series(toban: str, before: dt.date, store: KStore,
+                     max_days: int = PREV_SEARCH_DAYS, fetch: bool = True) -> Series:
+    """before より前で、その選手が最後に走った節を返す.
+    fetch=False のときは取得済みのデータだけで探す (待ち時間を増やさない)."""
+    get = store.get if fetch else (lambda d: store.cache.get(d, {}))
     day = before - dt.timedelta(days=1)
-    for _ in range(PREV_SEARCH_DAYS):
-        entries = store.get(day).get(toban)
+    for _ in range(max_days):
+        entries = get(day).get(toban)
         if entries:
             break
         day -= dt.timedelta(days=1)
@@ -388,7 +425,7 @@ def find_prev_series(toban: str, before: dt.date, store: KStore) -> Series:
     collected: list[KEntry] = []
     d, misses = day, 0
     while misses <= 1 and (day - d).days < 10:
-        es = [e for e in store.get(d).get(toban, []) if e.venue == venue]
+        es = [e for e in get(d).get(toban, []) if e.venue == venue]
         if es:
             collected = es + collected
             misses = 0
@@ -405,6 +442,97 @@ def find_prev_series(toban: str, before: dt.date, store: KStore) -> Series:
         end=collected[-1].day if collected else None,
         runs=[e.run for e in collected],
     )
+
+
+# ------------------------------------------------- 過去3節ページ (前節の特定) ----
+
+@dataclass
+class B3Race:
+    day: Optional[dt.date]
+    rno: Optional[int]
+    mark: str
+
+
+@dataclass
+class B3Series:
+    jcd: str
+    venue: str
+    start: dt.date
+    end: dt.date
+    races: list[B3Race]
+
+
+_B3_CACHE: dict[str, tuple[float, list[B3Series]]] = {}
+_B3_TTL = 3 * 3600
+
+
+def parse_back3(html: str) -> list[B3Series]:
+    s = BeautifulSoup(html, "html.parser")
+    out: list[B3Series] = []
+    for tb in s.select("table tbody"):
+        tds = tb.find_all("td", recursive=True)
+        if len(tds) < 6:
+            continue
+        dates = re.findall(r"(\d{4})/(\d{2})/(\d{2})", tds[0].get_text())
+        if len(dates) < 2:
+            continue
+        start, end = (dt.date(int(y), int(m), int(d)) for y, m, d in dates[:2])
+        img = tds[1].find("img")
+        venue = _norm(img.get("alt", "")) if img else ""
+        races: list[B3Race] = []
+        jcd = ""
+        for node in tds[-1].children:
+            if getattr(node, "name", None) == "a":
+                href = node.get("href", "")
+                mm = re.search(r"rno=(\d+)&(?:amp;)?jcd=(\d{2})&(?:amp;)?hd=(\d{8})", href)
+                mark = _norm(node.get_text()).strip("[]［］")
+                if mm:
+                    jcd = mm.group(2)
+                    races.append(B3Race(dt.datetime.strptime(mm.group(3), "%Y%m%d").date(), int(mm.group(1)), mark))
+                else:
+                    races.append(B3Race(None, None, mark))
+            else:
+                for ch in _norm(str(node)):
+                    races.append(B3Race(None, None, ch))
+        out.append(B3Series(jcd, venue or VENUES.get(jcd, ""), start, end, races))
+    return out
+
+
+def fetch_back3(toban: str) -> Optional[list[B3Series]]:
+    hit = _B3_CACHE.get(toban)
+    if hit and time.time() - hit[0] < _B3_TTL:
+        return hit[1]
+    try:
+        r = http_get(f"https://www.boatrace.jp/owpc/pc/data/racersearch/back3?toban={toban}")
+        r.encoding = "utf-8"
+        data = parse_back3(r.text)
+    except Exception:
+        return None
+    _B3_CACHE[toban] = (time.time(), data)
+    return data
+
+
+def pick_prev(series_list: Optional[list[B3Series]], before: dt.date) -> Optional[B3Series]:
+    """今節の初日より前に終わった節のうち、いちばん新しいものを選ぶ."""
+    if not series_list:
+        return None
+    cands = [x for x in series_list if x.end < before]
+    return max(cands, key=lambda x: x.end) if cands else None
+
+
+def prev_from_back3(toban: str, b3: B3Series, store: KStore) -> Series:
+    """過去3節ページの着順に、Kファイルから取ったSTを合わせる."""
+    runs: list[Run] = []
+    for r in b3.races:
+        k = None
+        if r.day is not None:
+            k = next((e for e in store.get(r.day).get(toban, []) if e.race == r.rno), None)
+        if k is not None:
+            runs.append(k.run)
+        else:
+            place, code, counted = _parse_mark(r.mark)
+            runs.append(Run(place, code, None, counted))
+    return Series(venue=b3.venue, start=b3.start, end=b3.end, runs=runs)
 
 
 # ------------------------------------------------------------- ランキング ----
@@ -460,14 +588,50 @@ def build_race(hd: str, jcd: str, rno: int,
                racelist_loader=fetch_racelist_html,
                result_loader=fetch_result_html,
                store: Optional[KStore] = None) -> RaceInfo:
-    info = parse_racelist(racelist_loader(hd, jcd, rno), hd, jcd, rno)
+    """出走表・前節・STをまとめて取得する.
+    公式サイトは1回の応答に時間がかかるので、なるべく同時に取りに行き、
+    取得済みのデータはディスクに残して使い回す."""
     store = store or KStore()
-    store.prefetch([info.series_start - dt.timedelta(days=i) for i in range(1, 22)])
+    target = dt.datetime.strptime(hd, "%Y%m%d").date()
+    window = [target - dt.timedelta(days=i) for i in range(1, 29)]
+
+    # 1) 出走表と、直近4週間の成績データを同時に取りに行く (取得済みの日は通信なし)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        k_fut = ex.submit(store.prefetch, window, 24)
+        info = parse_racelist(racelist_loader(hd, jcd, rno), hd, jcd, rno)
+        k_fut.result()
+    start = info.series_start
+    span = (start - window[-1]).days
+
+    # 2) まずは手元の成績データだけで前節を探す
+    lost = []
     for r in info.racers:
-        r.prev = find_prev_series(r.toban, info.series_start, store)
+        r.prev = find_prev_series(r.toban, start, store, max_days=span, fetch=False)
+        gap_missing = r.prev.end and any(
+            (r.prev.end + dt.timedelta(days=i)) in store.missing
+            for i in range(1, (start - r.prev.end).days))
+        if not r.prev.runs or gap_missing:
+            lost.append(r)
+
+    # 3) 見つからない選手 (前節が4週間以上前など) だけ、過去3節ページで確認する
+    if lost:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            b3 = {r.toban: ex.submit(fetch_back3, r.toban) for r in lost}
+            b3 = {t: pick_prev(f.result(), start) for t, f in b3.items()}
+        store.prefetch([x.day for p in b3.values() if p for x in p.races if x.day])
+        for r in lost:
+            if b3.get(r.toban):
+                r.prev = prev_from_back3(r.toban, b3[r.toban], store)
+
     if result_loader is not None:
         try:
             info.result = parse_result(result_loader(hd, jcd, rno))
         except Exception:
             info.result = None
     return info
+
+
+def warm_up(days: int = 28) -> None:
+    """アプリを開いた時点で、直近の成績データを先に集めておく."""
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
+    KStore().prefetch([today - dt.timedelta(days=i) for i in range(1, days + 1)], 24)

@@ -4,12 +4,12 @@
 """
 
 import datetime as dt
+import threading
 import unicodedata
 from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 import boat_core as bc
 
@@ -154,7 +154,7 @@ def table(headers, rows, top_first=False):
 
 # ------------------------------------------------------------- データ取得 ----
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3 * 3600, show_spinner=False)
 def open_venues(hd):
     try:
         return bc.parse_open_venues(bc.fetch_index_html(hd))
@@ -175,9 +175,17 @@ def get_result(hd, jcd, rno):
         return None
 
 
+@st.cache_resource(show_spinner=False)
+def warm_up(day_key):
+    """アプリを開いた時点で、直近4週間の成績データを裏で集め始める (1日1回)."""
+    threading.Thread(target=bc.warm_up, daemon=True).start()
+    return True
+
+
 # ------------------------------------------------------------------- 入力 ----
 
 today = dt.datetime.now(ZoneInfo("Asia/Tokyo")).date()
+warm_up(today.isoformat())
 
 
 st.markdown('<div class="lbl">日付</div>', unsafe_allow_html=True)
@@ -202,19 +210,6 @@ if st.button("ランキングを出す", type="primary", width="stretch"):
     st.session_state["query"] = (hd, jcd, rno)
     st.session_state.pop("show_result", None)
 
-# スマホで入力欄を押してもキーボードが出ないようにする（スマホ標準の日付選択はそのまま使う）
-components.html(
-    """<script>
-const doc = window.parent.document;
-const fix = () => doc.querySelectorAll('[data-testid="stDateInput"] input, [data-testid="stSelectbox"] input').forEach(i => {
-  if (i.type !== 'date') i.setAttribute('inputmode', 'none');
-  if (!i.dataset.dx) { i.dataset.dx = '1'; i.addEventListener('change', () => setTimeout(() => i.blur(), 80)); }  // 日付を選んだらすぐ確定
-});
-fix(); new MutationObserver(fix).observe(doc.body, {childList: true, subtree: true});
-</script>""",
-    height=0,
-)
-
 query = st.session_state.get("query")
 if not query:
     st.markdown(FOOT_SVG, unsafe_allow_html=True)
@@ -224,7 +219,7 @@ if not query:
 
 q_hd, q_jcd, q_rno = query
 try:
-    with st.spinner("公式サイトから成績を取得しています"):
+    with st.spinner("公式サイトから成績を取得しています（20秒ほどかかることがあります）", show_time=True):
         info = get_race(q_hd, q_jcd, q_rno)
 except ValueError as e:
     st.error(str(e))
