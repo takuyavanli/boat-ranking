@@ -16,7 +16,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
-SHOW_ST_MARK = False
+SHOW_ST_MARK = True
 
 LANE = {  # 枠の色 (背景, 文字)
     1: ("#FFFFFF", "#111111"), 2: ("#111111", "#FFFFFF"), 3: ("#E60012", "#FFFFFF"),
