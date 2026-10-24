@@ -610,6 +610,34 @@ def fetch_course(toban: str) -> Optional[dict[int, CourseStat]]:
     return data
 
 
+# ------------------------------------------------------- 合計点からの目安 ----
+# 10/23・10/24 の全会場336レースで、合計点 (3つを同じ重み) と実際の着順を集計した結果から決めた目安.
+
+GUIDE = {  # (枠の区分, 点数帯) -> (1着率, 3連対率)
+    ("1", "3〜7"): (67, 89), ("1", "8〜11"): (45, 82), ("1", "12〜16"): (25, 63),
+    ("2-6", "3〜7"): (21, 68), ("2-6", "8〜11"): (9, 50), ("2-6", "12〜16"): (4, 31),
+}
+
+
+def score_band(score: int) -> str:
+    return "3〜7" if score <= 7 else "8〜11" if score <= 11 else "12〜16" if score <= 16 else "17〜18"
+
+
+def candidate_label(waku: int, score: int) -> tuple[str, str]:
+    """枠番と合計点 (同じ重み) から、着順の目安ラベルを返す. 戻り値: (ラベル, 種類)."""
+    if waku == 1:
+        if score <= 11:
+            return "1〜2着候補", "c12"
+        if score <= 16:
+            return "2〜3着候補", "c23"
+        return "消し候補", "cx"
+    if score <= 7:
+        return "2〜3着候補", "c23"
+    if score <= 11:
+        return "3着候補", "c3"
+    return "消し候補", "cx"
+
+
 # ------------------------------------------------------------- ランキング ----
 
 def round_half_up(v: Optional[float], digits: int = 2) -> Optional[float]:

@@ -58,7 +58,7 @@ div.stButton > button[kind="secondary"] { border-color: var(--blue); color: var(
 /* 表 */
 .tblwrap { overflow-x: auto; }
 table.rk { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .93rem; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; }
-table.rk th { text-align: left; font-weight: 700; font-size: .76rem; color: var(--navy); background: var(--sky); padding: 7px 6px; }
+table.rk th { text-align: left; font-weight: 700; font-size: .72rem; white-space: nowrap; color: var(--navy); background: var(--sky); padding: 7px 6px; }
 table.rk td { padding: 9px 6px; border-top: 1px solid var(--line); vertical-align: middle; color: #1b2430; }
 table.rk tr.top td { background: #FFFBE0; }
 table.rk td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -71,6 +71,23 @@ table.rk td.name .sub { display: block; margin-left: 2.1em; line-height: 1.1; }
 div[data-testid="stExpander"] details { background: #fff; border-radius: 12px; }
 .marks { font-size: .76rem; color: #6b7a89; letter-spacing: .04em; white-space: normal; }
 .note { font-size: .78rem; color: #6b7a89; margin-top: .5rem; }
+/* 目安ラベル */
+.badge { display: inline-block; font-size: .68rem; font-weight: 800; line-height: 1; padding: .28em .55em; border-radius: 999px; white-space: nowrap; }
+.badge.c12 { background: var(--red); color: #fff; }
+.badge.c23 { background: var(--yellow); color: var(--navy); }
+.badge.c3 { background: #CFE8F7; color: var(--navy); }
+.badge.cx { background: #E4E8EC; color: #7a8896; }
+table.rk td.name .meta { display: flex; align-items: center; gap: .35rem; margin: .25rem 0 0 2.1em; }
+table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
+/* 合計点の見方 */
+.guide { background: #fff; border: 1.5px solid var(--line); border-radius: 12px; padding: .7rem .7rem .6rem; margin-top: .9rem; }
+.guide .gt { font-size: .86rem; font-weight: 800; color: var(--navy); margin: 0 0 .5rem .1rem; }
+.guide table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+.guide th { font-size: .74rem; color: var(--navy); font-weight: 700; text-align: left; padding: .2rem .3rem .4rem; }
+.guide td { padding: .45rem .3rem; border-top: 1px solid var(--line); vertical-align: top; color: #1b2430; line-height: 1.45; }
+.guide td.rowh { font-weight: 800; color: var(--navy); white-space: nowrap; }
+.guide td .badge { margin-bottom: .25rem; }
+.guide .gn { font-size: .72rem; color: #6b7a89; margin-top: .45rem; line-height: 1.5; }
 /* 結果 */
 .result { border-radius: 14px; background: #fff; border: 1.5px solid var(--line); padding: .9rem 1rem; display: flex; align-items: center; gap: .8rem; margin-top: .4rem; }
 .result .order { display: flex; align-items: center; gap: .3rem; font-weight: 800; color: var(--navy); }
@@ -138,6 +155,11 @@ def lane_chip(w):
 
 def pct(v):
     return "-" if v is None else f"{fmt(v, 1)}%"
+
+
+def badge(waku, score):
+    text, kind = bc.candidate_label(waku, score)
+    return f'<span class="badge {kind}">{text}</span>'
 
 
 def stacked(value, rank):
@@ -248,13 +270,15 @@ st.markdown(
 # ---------------------------------------------------------------- 総合順位 ----
 
 rows = bc.overall(info.racers, rate_weight=rate_weight)
+eq_score = {x["racer"].waku: x["score"] for x in bc.overall(info.racers, rate_weight=1)}
 section("総合順位")
 table(
     ["", "選手", "得点率", "平均ST", "コース", "合計"],
     [[
         f'<td class="pos">{r["rank"]}</td>',
         f'<td class="name">{lane_chip(r["racer"].waku)}{r["racer"].name}'
-        f'<div class="sub">{r["racer"].klass}</div></td>',
+        f'<span class="k"> {r["racer"].klass}</span>'
+        f'<div class="meta">{badge(r["racer"].waku, eq_score[r["racer"].waku])}</div></td>',
         stacked(fmt(r["racer"].total_rate), r["rate_rank"]),
         stacked(fmt(r["racer"].total_st), r["st_rank"]),
         stacked(pct(r["racer"].course_top3), r["course_rank"]),
@@ -266,6 +290,27 @@ st.markdown(
     '<div class="note">得点率・平均STは今節と前節を合わせた全走、コースは今回の枠と同じコースでの3連対率です。'
     + ("得点率の順位×2＋STの順位＋コースの順位" if rate_weight == 2 else "3つの順位の合計")
     + "が小さい順に並べています。</div>",
+    unsafe_allow_html=True,
+)
+
+
+def guide_cell(group, band, waku_for_label, score_for_label):
+    win, top3 = bc.GUIDE[(group, band)]
+    return (f'<td>{badge(waku_for_label, score_for_label)}<br>'
+            f'1着 {win}%<br>3連対 {top3}%</td>')
+
+
+st.markdown(
+    '<div class="guide"><div class="gt">合計点の見方</div><table>'
+    '<tr><th></th><th>3〜7点</th><th>8〜11点</th><th>12〜16点</th></tr>'
+    '<tr><td class="rowh">1号艇</td>'
+    + guide_cell("1", "3〜7", 1, 7) + guide_cell("1", "8〜11", 1, 11) + guide_cell("1", "12〜16", 1, 16)
+    + '</tr><tr><td class="rowh">2〜6号艇</td>'
+    + guide_cell("2-6", "3〜7", 2, 7) + guide_cell("2-6", "8〜11", 2, 11) + guide_cell("2-6", "12〜16", 2, 16)
+    + '</tr></table>'
+    '<div class="gn">17〜18点はほぼ3着以内に来ません（3連対6%）。'
+    '10/23・10/24の全会場336レースを、3つを同じ重みにした合計点で集計した目安です。'
+    'ラベルも同じ重みの合計点で判定しています。</div></div>',
     unsafe_allow_html=True,
 )
 
