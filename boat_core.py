@@ -672,11 +672,26 @@ def _formation(head: int, second: list[int], third: list[int]) -> list[tuple[int
     return out[:4]
 
 
-def suggest_bets(order: list[int], labels: dict[int, str]) -> dict:
-    """総合順位の並び (枠番の順) とラベルから、本線4点・穴目4点 (3連単) を作る.
-    本線: 1号艇が「1〜2着候補」なら1号艇が頭。そうでなければ★1着候補、いなければ総合1位が頭。
-    穴目: 本線の頭と1号艇以外で、★1着候補 (いなければ総合順位が一番上の艇) が頭。
-    2着・3着は、頭を除いた総合順位の上位から (2着2艇・3着3艇)。"""
+def _main8(head: int, rest: list[int]) -> list[tuple[int, int, int]]:
+    """本線8点: 1着固定・2着3艇・3着4艇 (いちばん下の組み合わせ 頭-C-D を1点削る)."""
+    A, B, C, D = rest[:4]
+    out = [(head, a, c) for a in (A, B, C) for c in (A, B, C, D) if c != a]
+    out.remove((head, C, D))
+    return out
+
+
+def _ana8(head: int, rest: list[int]) -> list[tuple[int, int, int]]:
+    """穴目8点: 頭と次の上位艇の1・2着裏表、3着は残り全艇."""
+    A = rest[0]
+    others = [w for w in rest if w != A]
+    return [(head, A, c) for c in others] + [(A, head, c) for c in others]
+
+
+def suggest_bets(order: list[int], labels: dict[int, str], points: int = 4) -> dict:
+    """総合順位の並び (枠番の順) とラベルから、本線・穴目 (3連単) を作る.
+    本線の頭: 1号艇が「1〜2着候補」なら1号艇。そうでなければ★1着候補、いなければ総合1位。
+    穴目の頭: 本線の頭と1号艇以外で、★1着候補 (いなければ総合順位が一番上の艇)。
+    相手は頭を除いた総合順位の上位から選ぶ。points=4 か 8。"""
     makuri = [w for w in order if labels.get(w) == "c1"]
     if labels.get(1) == "c12":
         head = 1
@@ -685,17 +700,63 @@ def suggest_bets(order: list[int], labels: dict[int, str]) -> dict:
     else:
         head = order[0]
     rest = [w for w in order if w != head]
-    main = _formation(head, rest[:2], rest[:3])
 
     cands = [w for w in order if w not in (head, 1)]
     cands.sort(key=lambda w: (LABEL_STRENGTH.get(labels.get(w), 9) != 0, order.index(w)))
     ana_head = cands[0]
     rest2 = [w for w in order if w != ana_head]
-    ana = _formation(ana_head, rest2[:2], rest2[:3])
+
+    j = lambda xs: "・".join(str(x) for x in xs)
+    if points == 8:
+        main = _main8(head, rest)
+        main_desc = (f"1着 <b>{head}</b>　2着 <b>{j(rest[:3])}</b>　3着 <b>{j(rest[:4])}</b>"
+                     f"（{head}-{rest[2]}-{rest[3]} を除く）")
+        ana = _ana8(ana_head, rest2)
+        ana_desc = (f"1・2着 <b>{ana_head}</b>と<b>{rest2[0]}</b>の裏表　"
+                    f"3着 <b>{j([w for w in rest2 if w != rest2[0]])}</b>")
+    else:
+        main = _formation(head, rest[:2], rest[:3])
+        main_desc = f"1着 <b>{head}</b>　2着 <b>{j(rest[:2])}</b>　3着 <b>{j(rest[:3])}</b>"
+        ana = _formation(ana_head, rest2[:2], rest2[:3])
+        ana_desc = f"1着 <b>{ana_head}</b>　2着 <b>{j(rest2[:2])}</b>　3着 <b>{j(rest2[:3])}</b>"
     return {
-        "main": main, "main_form": (head, rest[:2], rest[:3]),
-        "ana": ana, "ana_form": (ana_head, rest2[:2], rest2[:3]),
+        "main": main, "main_head": head, "main_desc": main_desc,
+        "ana": ana, "ana_head": ana_head, "ana_desc": ana_desc,
+        # 以前の形 (集計スクリプト用)
+        "main_form": (head, rest[:2], rest[:3]), "ana_form": (ana_head, rest2[:2], rest2[:3]),
     }
+
+
+# --------------------------------------------------------------- 買い判定 ----
+# 10/17〜10/24 の全場1,248レースで、本線・穴目の的中率と回収率 (1点100円) を集計した結果から決めた判定.
+# 前半 (10/21〜24) と後半 (10/17〜20) の両方で同じ傾向になったものだけを使っている.
+
+def bet_verdicts(score1: int, main_head: int, points: int = 4) -> dict:
+    """1号艇の合計点 (同じ重み)・本線の頭・点数から、本線と穴目の判定を返す.
+    戻り値: {"main": (判定, 種類, 説明), "ana": (...)}"""
+    if points == 8:
+        if main_head == 1 and score1 <= 7:
+            main = ("◎ 買い", "v-buy", "このタイプの本線8点：的中44%・回収84%（650レース）")
+        elif main_head == 1:
+            main = ("見送り推奨", "v-skip", "このタイプの本線8点：的中26%・回収58%（460レース）")
+        else:
+            main = ("○ 狙い", "v-ref", "このタイプの本線8点：的中20%・回収152%（138レース）。前半・後半とも100%超えだが、レース数は少なめ")
+        if score1 <= 7:
+            ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目8点：的中26%・回収62%（650レース）")
+        else:
+            ana = ("遊び枠", "v-play", "このタイプの穴目8点：的中15%・回収98%（598レース）。期間で回収がぶれるので少額で")
+        return {"main": main, "ana": ana}
+    if main_head == 1 and score1 <= 7:
+        main = ("◎ 買い", "v-buy", "このタイプの本線4点：的中28%・回収93%（650レース）")
+    elif main_head == 1:
+        main = ("見送り推奨", "v-skip", "このタイプの本線4点：的中17%・回収60%（460レース）")
+    else:
+        main = ("△ 参考", "v-ref", "このタイプの本線4点：的中12%・回収196%（138レース）。高配当頼みで判断保留")
+    if score1 <= 7:
+        ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目4点：的中6%・回収64%（650レース）")
+    else:
+        ana = ("遊び枠", "v-play", "このタイプの穴目4点：的中8%・回収72%（598レース）。少額での狙いに")
+    return {"main": main, "ana": ana}
 
 
 # ------------------------------------------------------------- ランキング ----

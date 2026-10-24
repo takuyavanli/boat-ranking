@@ -16,7 +16,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
-SHOW_ST_MARK = True
+SHOW_ST_MARK = False
 
 LANE = {  # 枠の色 (背景, 文字)
     1: ("#FFFFFF", "#111111"), 2: ("#111111", "#FFFFFF"), 3: ("#E60012", "#FFFFFF"),
@@ -105,11 +105,20 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .bet .tag { font-size: .7rem; font-weight: 800; padding: .25em .6em; border-radius: 999px; }
 .bet.main .tag { background: var(--red); color: #fff; }
 .bet.ana .tag { background: var(--navy); color: var(--yellow); }
+.bet .verdict { margin-left: auto; font-size: .74rem; font-weight: 800; padding: .3em .7em; border-radius: 999px; white-space: nowrap; }
+.verdict.v-buy { background: var(--blue); color: #fff; }
+.verdict.v-skip { background: #E4E8EC; color: #6b7a89; }
+.verdict.v-ref { background: #FFF4B8; color: var(--navy); border: 1px solid var(--yellow); }
+.verdict.v-play { background: #CFE8F7; color: var(--navy); }
+.bet .vnote { font-size: .72rem; color: #6b7a89; background: #F4F9FD; border-radius: 8px; padding: .35rem .55rem; margin: .1rem 0 .55rem; line-height: 1.5; }
+.bet.skip .grid { opacity: .45; }
 .bet .form { font-size: .76rem; color: #5b6b7c; margin-bottom: .55rem; line-height: 1.5; }
 .bet .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; }
 .combo { display: flex; align-items: center; justify-content: center; gap: .2rem; background: #F4F9FD; border-radius: 10px; padding: .45rem .3rem; }
 .combo .lane { margin: 0; width: 1.75em; height: 1.75em; font-size: .95rem; }
 .combo .dash { color: #9fb3c6; font-weight: 700; }
+.combo.dup { background: #fff; outline: 1.5px dashed #9fb3c6; outline-offset: -1.5px; }
+.bet .dupnote { font-size: .7rem; color: #6b7a89; margin-top: .45rem; }
 /* 結果 */
 .result { border-radius: 14px; background: #fff; border: 1.5px solid var(--line); padding: .9rem 1rem; display: flex; align-items: center; gap: .8rem; margin-top: .4rem; }
 .result .order { display: flex; align-items: center; gap: .3rem; font-weight: 800; color: var(--navy); }
@@ -179,22 +188,22 @@ def pct(v):
     return "-" if v is None else f"{fmt(v, 1)}%"
 
 
-def combo_html(c):
+def combo_html(c, dup=False):
     sep = '<span class="dash">-</span>'
-    return f'<div class="combo">{sep.join(lane_chip(w) for w in c)}</div>'
+    cls = "combo dup" if dup else "combo"
+    return f'<div class="{cls}">{sep.join(lane_chip(w) for w in c)}</div>'
 
 
-def form_text(form):
-    head, second, third = form
-    j = lambda xs: "・".join(str(x) for x in xs)
-    return f"1着 <b>{head}</b>　2着 <b>{j(second)}</b>　3着 <b>{j(third)}</b>"
-
-
-def bet_card(kind, title, tag, combos, form, note):
-    return (f'<div class="bet {kind}"><div class="bh"><span class="bt">{title}</span>'
-            f'<span class="tag">{tag}</span></div>'
-            f'<div class="form">{form_text(form)}<br>{note}</div>'
-            f'<div class="grid">{"".join(combo_html(c) for c in combos)}</div></div>')
+def bet_card(kind, title, tag, combos, form, note, verdict, dups=()):
+    vtext, vkind, vnote = verdict
+    dupnote = (f'<div class="dupnote">点線の{len(dups)}点は本線と同じ組み合わせです（重ねて買う必要はありません）。</div>'
+               if dups else "")
+    skip = " skip" if vkind == "v-skip" else ""
+    return (f'<div class="bet {kind}{skip}"><div class="bh"><span class="bt">{title}</span>'
+            f'<span class="tag">{tag}</span><span class="verdict {vkind}">{vtext}</span></div>'
+            f'<div class="form">{form}<br>{note}</div>'
+            f'<div class="vnote">{vnote}</div>'
+            f'<div class="grid">{"".join(combo_html(c, c in dups) for c in combos)}</div>{dupnote}</div>')
 
 
 def badge(waku, score, makuri=False):
@@ -281,6 +290,10 @@ weight_label = st.radio("総合順位の重み", ["3つを同じ重みで", "得
                         label_visibility="collapsed")
 rate_weight = 2 if weight_label.startswith("得点率を2倍") else 1
 
+st.markdown('<div class="lbl">買い目の点数</div>', unsafe_allow_html=True)
+points_label = st.radio("買い目の点数", ["8点ずつ", "4点ずつ"], horizontal=True, label_visibility="collapsed")
+points = 8 if points_label.startswith("8") else 4
+
 if st.button("ランキングを出す", type="primary", width="stretch"):
     st.session_state["query"] = (hd, jcd, rno)
     st.session_state.pop("show_result", None)
@@ -319,17 +332,22 @@ labels = {w: bc.candidate_label(w, eq_score[w], w in makuri)[1] for w in eq_scor
 
 # --------------------------------------------------------------- 買い目 ----
 
-bets = bc.suggest_bets([r["racer"].waku for r in rows], labels)
+bets = bc.suggest_bets([r["racer"].waku for r in rows], labels, points)
 section("買い目の目安（3連単）")
-main_head = bets["main_form"][0]
-ana_head = bets["ana_form"][0]
+main_head = bets["main_head"]
+ana_head = bets["ana_head"]
+verdicts = bc.bet_verdicts(eq_score[1], main_head, points)
 st.markdown(
     '<div class="bets">'
-    + bet_card("main", "本線", "4点", bets["main"], bets["main_form"],
-               f"頭は{main_head}号艇（{bc.candidate_label(main_head, eq_score[main_head], main_head in makuri)[0]}）。2・3着は総合順位の上位から。")
-    + bet_card("ana", "穴目", "4点", bets["ana"], bets["ana_form"],
-               f"頭は{ana_head}号艇（{bc.candidate_label(ana_head, eq_score[ana_head], ana_head in makuri)[0]}）。本線の頭が外れたときの狙い。")
-    + '</div>',
+    + bet_card("main", "本線", f"{points}点", bets["main"], bets["main_desc"],
+               f"頭は{main_head}号艇（{bc.candidate_label(main_head, eq_score[main_head], main_head in makuri)[0]}）。2・3着は総合順位の上位から。",
+               verdicts["main"])
+    + bet_card("ana", "穴目", f"{points}点", bets["ana"], bets["ana_desc"],
+               f"頭は{ana_head}号艇（{bc.candidate_label(ana_head, eq_score[ana_head], ana_head in makuri)[0]}）。本線の頭が外れたときの狙い。",
+               verdicts["ana"], dups=[c for c in bets["ana"] if c in bets["main"]])
+    + '</div>'
+    '<div class="note">判定は、10/17〜10/24の全場1,248レースで本線・穴目の的中率と回収率（1点100円）を集計し、'
+    '前半・後半の両方で同じ傾向になった条件から決めています。3連単は高配当で回収率が大きく動くので、目安として使ってください。</div>',
     unsafe_allow_html=True,
 )
 
