@@ -73,6 +73,7 @@ div[data-testid="stExpander"] details { background: #fff; border-radius: 12px; }
 .note { font-size: .78rem; color: #6b7a89; margin-top: .5rem; }
 /* 目安ラベル */
 .badge { display: inline-block; font-size: .68rem; font-weight: 800; line-height: 1; padding: .28em .55em; border-radius: 999px; white-space: nowrap; }
+.badge.c1 { background: var(--navy); color: var(--yellow); }
 .badge.c12 { background: var(--red); color: #fff; }
 .badge.c23 { background: var(--yellow); color: var(--navy); }
 .badge.c3 { background: #CFE8F7; color: var(--navy); }
@@ -87,6 +88,8 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .guide td { padding: .45rem .3rem; border-top: 1px solid var(--line); vertical-align: top; color: #1b2430; line-height: 1.45; }
 .guide td.rowh { font-weight: 800; color: var(--navy); white-space: nowrap; }
 .guide td .badge { margin-bottom: .25rem; }
+.guide .mk1 { display: flex; gap: .5rem; align-items: flex-start; border-top: 1px solid var(--line); padding: .55rem .3rem .1rem; font-size: .76rem; line-height: 1.55; color: #1b2430; }
+.guide .mk1 .badge { flex: none; margin-top: .1rem; }
 .guide .gn { font-size: .72rem; color: #6b7a89; margin-top: .45rem; line-height: 1.5; }
 /* 結果 */
 .result { border-radius: 14px; background: #fff; border: 1.5px solid var(--line); padding: .9rem 1rem; display: flex; align-items: center; gap: .8rem; margin-top: .4rem; }
@@ -157,8 +160,10 @@ def pct(v):
     return "-" if v is None else f"{fmt(v, 1)}%"
 
 
-def badge(waku, score):
-    text, kind = bc.candidate_label(waku, score)
+def badge(waku, score, makuri=False):
+    text, kind = bc.candidate_label(waku, score, makuri)
+    if kind == "c1":
+        text = "★" + text
     return f'<span class="badge {kind}">{text}</span>'
 
 
@@ -271,6 +276,7 @@ st.markdown(
 
 rows = bc.overall(info.racers, rate_weight=rate_weight)
 eq_score = {x["racer"].waku: x["score"] for x in bc.overall(info.racers, rate_weight=1)}
+makuri = bc.makuri_wakus(info.racers, eq_score)
 section("総合順位")
 table(
     ["", "選手", "得点率", "平均ST", "コース", "合計"],
@@ -278,7 +284,7 @@ table(
         f'<td class="pos">{r["rank"]}</td>',
         f'<td class="name">{lane_chip(r["racer"].waku)}{r["racer"].name}'
         f'<span class="k"> {r["racer"].klass}</span>'
-        f'<div class="meta">{badge(r["racer"].waku, eq_score[r["racer"].waku])}</div></td>',
+        f'<div class="meta">{badge(r["racer"].waku, eq_score[r["racer"].waku], r["racer"].waku in makuri)}</div></td>',
         stacked(fmt(r["racer"].total_rate), r["rate_rank"]),
         stacked(fmt(r["racer"].total_st), r["st_rank"]),
         stacked(pct(r["racer"].course_top3), r["course_rank"]),
@@ -308,9 +314,13 @@ st.markdown(
     + '</tr><tr><td class="rowh">2〜6号艇</td>'
     + guide_cell("2-6", "3〜7", 2, 7) + guide_cell("2-6", "8〜11", 2, 11) + guide_cell("2-6", "12〜16", 2, 16)
     + '</tr></table>'
+    f'<div class="mk1">{badge(2, 7, True)}'
+    '<div><b>まくり型</b>：2〜4号艇で、平均STが内側の艇全員より0.02秒以上早く、合計点が7点以下。'
+    f'1着 {bc.MAKURI_GUIDE[0]}%・2連対 {bc.MAKURI_GUIDE[1]}%・3連対 {bc.MAKURI_GUIDE[2]}%。'
+    'この艇がいるレースは、1号艇の1着率が58%から41%に下がります。</div></div>'
     '<div class="gn">17〜18点はほぼ3着以内に来ません（3連対6%）。'
-    '10/23・10/24の全会場336レースを、3つを同じ重みにした合計点で集計した目安です。'
-    'ラベルも同じ重みの合計点で判定しています。</div></div>',
+    '表は10/23・10/24の全会場336レース、まくり型は10/21〜10/24の648レースで集計した目安です。'
+    'ラベルは3つを同じ重みにした合計点で判定しています。</div></div>',
     unsafe_allow_html=True,
 )
 
@@ -400,6 +410,7 @@ with st.expander("計算のルール"):
 - 平均STは F・L・欠場を除いて計算し、小数第2位で四捨五入して表示します。
 - コース別3連対率は、今回の枠番と同じコースでの3着以内率です（公式サイトの選手データ）。
 - 総合順位は、得点率・平均ST・コース別3連対率の順位の合計が小さい順です。同点のときは得点率が上の選手を上にします。
+- 「★1着候補」は、2〜4号艇で平均STが内側の艇全員より0.02秒以上早く、合計点（同じ重み）が7点以下の艇です。
 - データ元：BOAT RACE オフィシャルウェブサイト。サイトの仕様が変わると動かなくなることがあります。
 """
     )

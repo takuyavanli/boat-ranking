@@ -623,8 +623,27 @@ def score_band(score: int) -> str:
     return "3〜7" if score <= 7 else "8〜11" if score <= 11 else "12〜16" if score <= 16 else "17〜18"
 
 
-def candidate_label(waku: int, score: int) -> tuple[str, str]:
+MAKURI_GUIDE = (31, 61, 76)  # まくり型の 1着率・2連対率・3連対率 (10/21〜10/24 の648レース)
+
+
+def makuri_wakus(racers: list[Racer], eq_score: dict[int, int]) -> set[int]:
+    """1着候補 (まくり型) の枠番を返す.
+    2〜4号艇で、合計点 (同じ重み) が7点以下、かつ平均STが内側の艇全員より0.02秒以上早い艇."""
+    by_waku = {r.waku: r for r in racers}
+    out = set()
+    for r in racers:
+        if not (2 <= r.waku <= 4) or eq_score.get(r.waku, 99) > 7 or r.total_st is None:
+            continue
+        inner = [by_waku.get(i) for i in range(1, r.waku)]
+        if all(x is None or x.total_st is None or round(x.total_st - r.total_st, 3) >= 0.02 for x in inner):
+            out.add(r.waku)
+    return out
+
+
+def candidate_label(waku: int, score: int, makuri: bool = False) -> tuple[str, str]:
     """枠番と合計点 (同じ重み) から、着順の目安ラベルを返す. 戻り値: (ラベル, 種類)."""
+    if makuri:
+        return "1着候補", "c1"
     if waku == 1:
         if score <= 11:
             return "1〜2着候補", "c12"
