@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import tempfile
 import threading
@@ -188,6 +189,11 @@ class Racer:
     branch: str
     current: Series
     prev: Series = field(default_factory=Series)
+    course: Optional["CourseStat"] = None   # 今回の枠と同じコースでの成績
+
+    @property
+    def course_top3(self) -> Optional[float]:
+        return self.course.top3 if self.course else None
 
     @property
     def total_rate(self) -> Optional[float]:
@@ -535,6 +541,75 @@ def prev_from_back3(toban: str, b3: B3Series, store: KStore) -> Series:
     return Series(venue=b3.venue, start=b3.start, end=b3.end, runs=runs)
 
 
+# --------------------------------------------------------- コース別成績 ----
+
+@dataclass
+class CourseStat:
+    course: int
+    top3: Optional[float]   # 3連対率 (%)
+    win: Optional[float]    # 1着率 (%)
+
+
+_COURSE_CACHE: dict[str, tuple[float, dict[int, CourseStat]]] = {}
+_COURSE_TTL = 12 * 3600
+_COURSE_DIR = Path(tempfile.gettempdir()) / "boatdx_course"
+
+
+def _pct(text: str) -> Optional[float]:
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", text or "")
+    return float(m.group(1)) if m else None
+
+
+def parse_course(html: str) -> dict[int, CourseStat]:
+    """選手ページ「コース別成績」から、コースごとの3連対率と1着率を取り出す."""
+    s = BeautifulSoup(html, "html.parser")
+    out: dict[int, CourseStat] = {}
+    for table in s.find_all("table"):
+        head = table.find("thead")
+        if not head or "コース別3連対率" not in head.get_text():
+            continue
+        for tr in table.select("tbody tr"):
+            th = tr.find("th")
+            c = _norm(th.get_text()).translate(Z2H) if th else ""
+            if not c.isdigit():
+                continue
+            label = tr.select_one(".table1_progress2Label")
+            bars = tr.select(".table1_progress2Bar > span.is-progress")
+            win = _pct(bars[0].get("style", "")) if bars else None
+            out[int(c)] = CourseStat(int(c), _pct(label.get_text() if label else ""), win)
+        break
+    return out
+
+
+def fetch_course(toban: str) -> Optional[dict[int, CourseStat]]:
+    hit = _COURSE_CACHE.get(toban)
+    if hit and time.time() - hit[0] < _COURSE_TTL:
+        return hit[1]
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
+    path = _COURSE_DIR / f"{toban}_{today:%Y%m%d}.json"
+    data = None
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            data = {int(k): CourseStat(int(k), v[0], v[1]) for k, v in raw.items()}
+        except (OSError, ValueError):
+            data = None
+    if data is None:
+        try:
+            r = http_get(f"https://www.boatrace.jp/owpc/pc/data/racersearch/course?toban={toban}")
+            r.encoding = "utf-8"
+            data = parse_course(r.text)
+        except Exception:
+            return None
+        try:
+            _COURSE_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({k: [v.top3, v.win] for k, v in data.items()}), encoding="utf-8")
+        except OSError:
+            pass
+    _COURSE_CACHE[toban] = (time.time(), data)
+    return data
+
+
 # ------------------------------------------------------------- ランキング ----
 
 def round_half_up(v: Optional[float], digits: int = 2) -> Optional[float]:
@@ -566,17 +641,18 @@ def rank_map(values: dict[int, Optional[float]], higher_is_better: bool,
 
 
 def overall(racers: list[Racer], rate_weight: int = 1) -> list[dict]:
-    rates = {r.waku: r.total_rate for r in racers}
-    sts = {r.waku: r.total_st for r in racers}
-    rr = rank_map(rates, higher_is_better=True)
-    sr = rank_map(sts, higher_is_better=False)
+    """得点率・平均ST・コース別3連対率の順位を合計して並べる."""
+    rr = rank_map({r.waku: r.total_rate for r in racers}, higher_is_better=True)
+    sr = rank_map({r.waku: r.total_st for r in racers}, higher_is_better=False)
+    cr = rank_map({r.waku: r.course_top3 for r in racers}, higher_is_better=True, digits=1)
     rows = []
     for r in racers:
         rows.append({
             "racer": r,
             "rate_rank": rr[r.waku],
             "st_rank": sr[r.waku],
-            "score": rr[r.waku] * rate_weight + sr[r.waku],
+            "course_rank": cr[r.waku],
+            "score": rr[r.waku] * rate_weight + sr[r.waku] + cr[r.waku],
         })
     rows.sort(key=lambda x: (x["score"], -(x["racer"].total_rate or -1), x["racer"].waku))
     for i, row in enumerate(rows, 1):
@@ -613,11 +689,15 @@ def build_race(hd: str, jcd: str, rno: int,
         if not r.prev.runs or gap_missing:
             lost.append(r)
 
-    # 3) 見つからない選手 (前節が4週間以上前など) だけ、過去3節ページで確認する
+    # 3) 6人のコース別成績と、前節が見つからない選手の過去3節ページを同時に取る
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        cs = {r.toban: ex.submit(fetch_course, r.toban) for r in info.racers}
+        b3 = {r.toban: ex.submit(fetch_back3, r.toban) for r in lost}
+        cs = {t: f.result() for t, f in cs.items()}
+        b3 = {t: pick_prev(f.result(), start) for t, f in b3.items()}
+    for r in info.racers:
+        r.course = (cs.get(r.toban) or {}).get(r.waku)
     if lost:
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            b3 = {r.toban: ex.submit(fetch_back3, r.toban) for r in lost}
-            b3 = {t: pick_prev(f.result(), start) for t, f in b3.items()}
         store.prefetch([x.day for p in b3.values() if p for x in p.races if x.day])
         for r in lost:
             if b3.get(r.toban):

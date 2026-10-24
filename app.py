@@ -64,7 +64,8 @@ table.rk tr.top td { background: #FFFBE0; }
 table.rk td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.rk td.pos { font-size: 1.1rem; font-weight: 800; width: 2em; text-align: center; color: var(--blue); }
 table.rk td.name { white-space: nowrap; }
-table.rk .sub { font-size: .74rem; color: #7a8896; }
+table.rk .sub { font-size: .72rem; color: #7a8896; font-weight: 500; }
+table.rk td.name .sub { display: block; margin-left: 2.1em; line-height: 1.1; }
 .lane { display: inline-flex; align-items: center; justify-content: center; width: 1.65em; height: 1.65em; font-weight: 800;
   border-radius: 4px; border: 1px solid rgba(0,0,0,.25); margin-right: .45em; font-size: .9em; }
 div[data-testid="stExpander"] details { background: #fff; border-radius: 12px; }
@@ -117,7 +118,7 @@ FOOT_SVG = """<div class="foot"><svg viewBox="0 0 400 46" preserveAspectRatio="n
 
 st.markdown(
     f'<div class="hero"><div class="sun"></div><h1>ボートレースDX</h1>'
-    f'<p>得点率と平均STで、出走6艇をランキング</p>{BOAT_SVG}{SEA_SVG}</div>',
+    f'<p>得点率・平均ST・コース成績で、出走6艇をランキング</p>{BOAT_SVG}{SEA_SVG}</div>',
     unsafe_allow_html=True,
 )
 
@@ -133,6 +134,15 @@ def fmt(v, digits=2):
 def lane_chip(w):
     bg, fg = LANE[w]
     return f'<span class="lane" style="background:{bg};color:{fg}">{w}</span>'
+
+
+def pct(v):
+    return "-" if v is None else f"{fmt(v, 1)}%"
+
+
+def stacked(value, rank):
+    """値の下に小さく順位を出す (スマホで横幅を取らないように)."""
+    return f'<td class="num">{value}<div class="sub">{rank}位</div></td>'
 
 
 def period(s: bc.Series):
@@ -202,7 +212,7 @@ rno = st.pills("レース", list(range(1, 13)), default=1, label_visibility="col
                format_func=lambda n: f"{n}R") or 1
 
 st.markdown('<div class="lbl">総合順位の重み</div>', unsafe_allow_html=True)
-weight_label = st.radio("総合順位の重み", ["得点率とSTを同じ重みで", "得点率を2倍重視"], horizontal=True,
+weight_label = st.radio("総合順位の重み", ["3つを同じ重みで", "得点率を2倍重視"], horizontal=True,
                         label_visibility="collapsed")
 rate_weight = 2 if weight_label.startswith("得点率を2倍") else 1
 
@@ -240,20 +250,21 @@ st.markdown(
 rows = bc.overall(info.racers, rate_weight=rate_weight)
 section("総合順位")
 table(
-    ["", "選手", "得点率", "平均ST", "合計"],
+    ["", "選手", "得点率", "平均ST", "コース", "合計"],
     [[
         f'<td class="pos">{r["rank"]}</td>',
         f'<td class="name">{lane_chip(r["racer"].waku)}{r["racer"].name}'
-        f'<span class="sub"> {r["racer"].klass}</span></td>',
-        f'<td class="num">{fmt(r["racer"].total_rate)}<span class="sub">（{r["rate_rank"]}位）</span></td>',
-        f'<td class="num">{fmt(r["racer"].total_st)}<span class="sub">（{r["st_rank"]}位）</span></td>',
-        f'<td class="num">{r["score"]}</td>',
+        f'<div class="sub">{r["racer"].klass}</div></td>',
+        stacked(fmt(r["racer"].total_rate), r["rate_rank"]),
+        stacked(fmt(r["racer"].total_st), r["st_rank"]),
+        stacked(pct(r["racer"].course_top3), r["course_rank"]),
+        f'<td class="num"><b>{r["score"]}</b></td>',
     ] for r in rows],
     top_first=True,
 )
 st.markdown(
-    '<div class="note">得点率・平均STは今節と前節を合わせた全走で計算。'
-    + ("得点率の順位×2＋STの順位" if rate_weight == 2 else "得点率の順位＋STの順位")
+    '<div class="note">得点率・平均STは今節と前節を合わせた全走、コースは今回の枠と同じコースでの3連対率です。'
+    + ("得点率の順位×2＋STの順位＋コースの順位" if rate_weight == 2 else "3つの順位の合計")
     + "が小さい順に並べています。</div>",
     unsafe_allow_html=True,
 )
@@ -293,6 +304,27 @@ for tab, pick in ((tab_cur, lambda r: r.current), (tab_prev, lambda r: r.prev)):
             ] for r in ordered],
         )
 
+# ------------------------------------------------------- コース別3連対率 ----
+
+section("コース別3連対率")
+cr = bc.rank_map({r.waku: r.course_top3 for r in info.racers}, higher_is_better=True, digits=1)
+by_course = sorted(info.racers, key=lambda r: (cr[r.waku], r.waku))
+table(
+    ["", "選手", "コース", "3連対率", "1着率"],
+    [[
+        f'<td class="pos">{cr[r.waku]}</td>',
+        f'<td class="name">{lane_chip(r.waku)}{r.name}</td>',
+        f'<td class="num">{r.waku}コース</td>',
+        f'<td class="num"><b>{pct(r.course_top3)}</b></td>',
+        f'<td class="num">{pct(r.course.win if r.course else None)}</td>',
+    ] for r in by_course],
+)
+st.markdown(
+    '<div class="note">公式サイトの選手データ（コース別成績）の数字です。'
+    '前付けなどで枠とコースが変わった場合は反映されません。</div>',
+    unsafe_allow_html=True,
+)
+
 # ------------------------------------------------------------------ 結果 ----
 
 section("レース結果")
@@ -321,6 +353,8 @@ with st.expander("計算のルール"):
 - 今節は、選んだレースより前に終わったレースだけを使います。
 - 前節は、今節の初日より前で最後に走った節です（公式の日別競走成績データから検索）。
 - 平均STは F・L・欠場を除いて計算し、小数第2位で四捨五入して表示します。
+- コース別3連対率は、今回の枠番と同じコースでの3着以内率です（公式サイトの選手データ）。
+- 総合順位は、得点率・平均ST・コース別3連対率の順位の合計が小さい順です。同点のときは得点率が上の選手を上にします。
 - データ元：BOAT RACE オフィシャルウェブサイト。サイトの仕様が変わると動かなくなることがあります。
 """
     )
