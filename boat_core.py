@@ -657,6 +657,47 @@ def candidate_label(waku: int, score: int, makuri: bool = False) -> tuple[str, s
     return "消し候補", "cx"
 
 
+# ------------------------------------------------------------ 買い目の目安 ----
+
+LABEL_STRENGTH = {"c1": 0, "c12": 1, "c23": 2, "c3": 3, "cx": 4}
+
+
+def _formation(head: int, second: list[int], third: list[int]) -> list[tuple[int, int, int]]:
+    """1着固定・2着2艇・3着3艇のフォーメーション (重複を除いて4点)."""
+    out = []
+    for a in second:
+        for b in third:
+            if len({head, a, b}) == 3:
+                out.append((head, a, b))
+    return out[:4]
+
+
+def suggest_bets(order: list[int], labels: dict[int, str]) -> dict:
+    """総合順位の並び (枠番の順) とラベルから、本線4点・穴目4点 (3連単) を作る.
+    本線: 1号艇が「1〜2着候補」なら1号艇が頭。そうでなければ★1着候補、いなければ総合1位が頭。
+    穴目: 本線の頭と1号艇以外で、★1着候補 (いなければ総合順位が一番上の艇) が頭。
+    2着・3着は、頭を除いた総合順位の上位から (2着2艇・3着3艇)。"""
+    makuri = [w for w in order if labels.get(w) == "c1"]
+    if labels.get(1) == "c12":
+        head = 1
+    elif makuri:
+        head = makuri[0]
+    else:
+        head = order[0]
+    rest = [w for w in order if w != head]
+    main = _formation(head, rest[:2], rest[:3])
+
+    cands = [w for w in order if w not in (head, 1)]
+    cands.sort(key=lambda w: (LABEL_STRENGTH.get(labels.get(w), 9) != 0, order.index(w)))
+    ana_head = cands[0]
+    rest2 = [w for w in order if w != ana_head]
+    ana = _formation(ana_head, rest2[:2], rest2[:3])
+    return {
+        "main": main, "main_form": (head, rest[:2], rest[:3]),
+        "ana": ana, "ana_form": (ana_head, rest2[:2], rest2[:3]),
+    }
+
+
 # ------------------------------------------------------------- ランキング ----
 
 def round_half_up(v: Optional[float], digits: int = 2) -> Optional[float]:
