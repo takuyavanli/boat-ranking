@@ -276,12 +276,21 @@ def parse_racelist(html: str, hd: str, jcd: str, rno: int) -> RaceInfo:
     )
 
 
-def parse_result(html: str) -> Optional[str]:
+def parse_result_detail(html: str) -> Optional[tuple[list[int], str]]:
+    """結果ページから 3連単の着順 (艇番3つ) と払戻金を取り出す. 未確定なら None."""
     text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
     m = re.search(r"3連単\s*(\d)\s*-\s*(\d)\s*-\s*(\d)\s*[¥￥]\s*([\d,]+)", text)
     if not m:
         return None
-    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}（3連単 {m.group(4)}円）"
+    return [int(m.group(i)) for i in (1, 2, 3)], m.group(4)
+
+
+def parse_result(html: str) -> Optional[str]:
+    d = parse_result_detail(html)
+    if not d:
+        return None
+    (a, b, c), pay = d
+    return f"{a}-{b}-{c}（3連単 {pay}円）"
 
 
 def parse_open_venues(html: str) -> list[str]:
@@ -456,8 +465,9 @@ def build_race(hd: str, jcd: str, rno: int,
     store.prefetch([info.series_start - dt.timedelta(days=i) for i in range(1, 22)])
     for r in info.racers:
         r.prev = find_prev_series(r.toban, info.series_start, store)
-    try:
-        info.result = parse_result(result_loader(hd, jcd, rno))
-    except Exception:
-        info.result = None
+    if result_loader is not None:
+        try:
+            info.result = parse_result(result_loader(hd, jcd, rno))
+        except Exception:
+            info.result = None
     return info
