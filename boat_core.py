@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 import lzh
 
 # app.py と組み合わせが合っているかの確認用. app.py の APP_VERSION と同じにしておく.
-VERSION = "2026-10-26"
+VERSION = "2026-10-26b"
 
 UA = {"User-Agent": "Mozilla/5.0 (personal boat race stats tool)"}
 BASE = "https://www.boatrace.jp/owpc/pc/race"
@@ -805,7 +805,13 @@ def suggest_bets(order: list[int], labels: dict[int, str], points: int = 4) -> d
     rest2 = [w for w in order if w != ana_head]
 
     j = lambda xs: "・".join(str(x) for x in xs)
-    if points == 8:
+    if points == 12:
+        flow = lambda h, r: [(h, a, c) for a in r[:4] for c in r[:4] if a != c]
+        main = flow(head, rest)
+        main_desc = f"1着 <b>{head}</b>　2着 <b>{j(rest[:4])}</b>　3着 <b>{j(rest[:4])}</b>"
+        ana = flow(ana_head, rest2)
+        ana_desc = f"1着 <b>{ana_head}</b>　2着 <b>{j(rest2[:4])}</b>　3着 <b>{j(rest2[:4])}</b>"
+    elif points == 8:
         main = _main8(head, rest)
         main_desc = (f"1着 <b>{head}</b>　2着 <b>{j(rest[:3])}</b>　3着 <b>{j(rest[:4])}</b>"
                      f"（{head}-{rest[2]}-{rest[3]} を除く）")
@@ -833,6 +839,18 @@ def bet_verdicts(score1: int, main_head: int, points: int = 4) -> dict:
     """1号艇の合計点 (同じ重み)・本線の頭・点数から、本線と穴目の判定を返す.
     戻り値: {"main": (判定, 種類, 説明), "ana": (...)}"""
     buy = score1 <= RULES["vbuy"]
+    if points == 12:
+        if main_head == 1 and buy:
+            main = ("◎ 買い", "v-buy", "このタイプの本線12点：的中53%・回収81%（653レース）")
+        elif main_head == 1:
+            main = ("見送り推奨", "v-skip", "このタイプの本線12点：的中34%・回収66%（457レース）")
+        else:
+            main = ("○ 狙い", "v-ref", "このタイプの本線12点：的中28%・回収136%（138レース）。前半124%・後半148%")
+        if buy:
+            ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目12点：的中12%・回収57%（653レース）")
+        else:
+            ana = ("遊び枠", "v-play", "このタイプの穴目12点：的中17%・回収112%（595レース）。前半81%・後半143%とぶれが大きいので少額で")
+        return {"main": main, "ana": ana}
     if points == 8:
         if main_head == 1 and buy:
             main = ("◎ 買い", "v-buy", "このタイプの本線8点：的中44%・回収84%（653レース）")

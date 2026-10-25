@@ -16,7 +16,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # boat_core.py と組み合わせが合っているかの確認用 (boat_core.VERSION と同じにしておく)
-APP_VERSION = "2026-10-26"
+APP_VERSION = "2026-10-26b"
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
 SHOW_ST_MARK = False
@@ -402,8 +402,9 @@ weight_label = st.radio("総合順位の重み", ["3つを同じ重みで", "得
 rate_weight = 2 if weight_label.startswith("得点率を2倍") else 1
 
 st.markdown('<div class="lbl">買い目の点数</div>', unsafe_allow_html=True)
-points_label = st.radio("買い目の点数", ["8点ずつ", "4点ずつ"], horizontal=True, label_visibility="collapsed")
-points = 8 if points_label.startswith("8") else 4
+points_label = st.radio("買い目の点数", ["4点ずつ", "8点ずつ", "12点ずつ"], index=1, horizontal=True,
+                        label_visibility="collapsed")
+points = int(points_label.split("点")[0])
 
 if st.button("ランキングを出す", type="primary", width="stretch"):
     st.session_state["query"] = (hd, jcd, rno)
