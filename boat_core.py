@@ -31,6 +31,9 @@ from requests.adapters import HTTPAdapter
 
 import lzh
 
+# app.py と組み合わせが合っているかの確認用. app.py の APP_VERSION と同じにしておく.
+VERSION = "2026-10-26"
+
 UA = {"User-Agent": "Mozilla/5.0 (personal boat race stats tool)"}
 BASE = "https://www.boatrace.jp/owpc/pc/race"
 

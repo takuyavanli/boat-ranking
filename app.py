@@ -15,6 +15,9 @@ import boat_core as bc
 
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
+# boat_core.py と組み合わせが合っているかの確認用 (boat_core.VERSION と同じにしておく)
+APP_VERSION = "2026-10-26"
+
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
 SHOW_ST_MARK = False
 
@@ -213,6 +216,15 @@ st.markdown(
 )
 
 
+if getattr(bc, "VERSION", None) != APP_VERSION:
+    st.error(
+        "app.py と boat_core.py の版が合っていません。"
+        "GitHub に、zip の中の app.py・boat_core.py・lzh.py の3つをまとめて上書きしてください。"
+        f"（app.py: {APP_VERSION} ／ boat_core.py: {getattr(bc, 'VERSION', '古い版')}）"
+    )
+    st.stop()
+
+
 # ------------------------------------------------------------ 表示用の関数 ----
 
 def fmt(v, digits=2):
@@ -334,11 +346,15 @@ def get_race(hd, jcd, rno):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_odds(hd, jcd, rno):
+    """戻り値: (オッズ, 取得時刻, 取れなかったときの理由)."""
+    now = dt.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M")
     try:
         odds = bc.parse_odds3t(bc.fetch_odds_html(hd, jcd, rno))
-    except Exception:
-        odds = {}
-    return odds, dt.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M")
+    except Exception as e:
+        return {}, now, f"{type(e).__name__}"
+    if not odds:
+        return {}, now, "まだ発売前か、オッズが出ていません"
+    return odds, now, ""
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -404,7 +420,7 @@ if day_query:
         with st.spinner("全レースの判定と結果を集めています（30秒ほどかかります）", show_time=True):
             day = get_day(d_hd, d_jcd, points)
     except Exception as e:
-        st.error(f"データを取得できませんでした。（{type(e).__name__}）")
+        st.error(f"データを取得できませんでした。（{type(e).__name__}: {str(e)[:160]}）")
         st.stop()
     dd = dt.datetime.strptime(d_hd, "%Y%m%d").date()
 
@@ -484,7 +500,7 @@ except ValueError as e:
     st.error(str(e))
     st.stop()
 except Exception as e:
-    st.error(f"データを取得できませんでした。時間をおいて再度お試しください。（{type(e).__name__}）")
+    st.error(f"データを取得できませんでした。時間をおいて再度お試しください。（{type(e).__name__}: {str(e)[:160]}）")
     st.stop()
 
 d = dt.datetime.strptime(q_hd, "%Y%m%d").date()
@@ -511,7 +527,7 @@ if st.button("🔄 オッズを更新", key="odds_refresh"):
 main_head = bets["main_head"]
 ana_head = bets["ana_head"]
 verdicts = bc.bet_verdicts(eq_score[1], main_head, points)
-odds, otime = get_odds(q_hd, q_jcd, q_rno)
+odds, otime, odds_err = get_odds(q_hd, q_jcd, q_rno)
 st.markdown(
     '<div class="bets">'
     + bet_card("main", "本線", f"{points}点", bets["main"], bets["main_desc"],
@@ -521,7 +537,8 @@ st.markdown(
                f"頭は{ana_head}号艇（{bc.candidate_label(ana_head, eq_score[ana_head], ana_head in makuri)[0]}）。本線の頭が外れたときの狙い。",
                verdicts["ana"], dups=[c for c in bets["ana"] if c in bets["main"]], odds=odds, points=points, otime=otime)
     + '</div>'
-    '<div class="note">判定は、10/17〜10/24の全場1,248レースで本線・穴目の的中率と回収率（1点100円）を集計し、'
+    + (f'<div class="note" style="color:#E60012">オッズを取得できませんでした（{odds_err}）。「オッズを更新」で取り直せます。</div>' if odds_err else '')
+    + '<div class="note">判定は、10/17〜10/24の全場1,248レースで本線・穴目の的中率と回収率（1点100円）を集計し、'
     '前半・後半の両方で同じ傾向になった条件から決めています。3連単は高配当で回収率が大きく動くので、目安として使ってください。</div>',
     unsafe_allow_html=True,
 )
