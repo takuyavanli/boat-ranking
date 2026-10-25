@@ -886,6 +886,99 @@ def motor_prev_runs(venue: str, before: dt.date, store: KStore, max_days: int = 
     return out
 
 
+# ------------------------------------------------------------------- オッズ ----
+
+def fetch_odds_html(hd: str, jcd: str, rno: int) -> str:
+    r = http_get(f"{BASE}/odds3t?rno={rno}&jcd={jcd}&hd={hd}")
+    r.encoding = "utf-8"
+    return r.text
+
+
+def parse_odds3t(html: str) -> dict[tuple[int, int, int], Optional[float]]:
+    """3連単オッズの表を {(1着, 2着, 3着): オッズ} にする. 発売前・欠場などは None."""
+    s = BeautifulSoup(html, "html.parser")
+    tables = s.select("div.table1 table")
+    out: dict[tuple[int, int, int], Optional[float]] = {}
+    target = None
+    for t in tables:
+        if t.select_one("td.oddsPoint"):
+            target = t
+            break
+    if target is None:
+        return out
+    second = [None] * 6
+    for tr in target.select("tbody tr"):
+        tds = tr.find_all("td", recursive=False)
+        i, col = 0, 0
+        while i < len(tds) and col < 6:
+            td = tds[i]
+            if td.get("rowspan"):
+                second[col] = int(_norm(td.get_text()).translate(Z2H) or 0)
+                i += 1
+                if i >= len(tds):
+                    break
+                td = tds[i]
+            third_txt = _norm(td.get_text()).translate(Z2H)
+            odds_td = tds[i + 1] if i + 1 < len(tds) else None
+            i += 2
+            if third_txt.isdigit() and second[col]:
+                txt = _norm(odds_td.get_text()) if odds_td else ""
+                try:
+                    val = float(txt.replace(",", ""))
+                except ValueError:
+                    val = None
+                out[(col + 1, second[col], int(third_txt))] = val
+            col += 1
+    return out
+
+
+# ---------------------------------------------------------------- 1日まとめ ----
+
+def analyze_race(info: RaceInfo, points: int = 8) -> dict:
+    """1レース分の総合順位・ラベル・買い目・判定をまとめて返す (画面と1日まとめで共通)."""
+    rows = overall(info.racers, 1)
+    eq = {x["racer"].waku: x["score"] for x in rows}
+    mk = makuri_wakus(info.racers, eq)
+    labels = {w: candidate_label(w, eq[w], w in mk)[1] for w in eq}
+    bets = suggest_bets([x["racer"].waku for x in rows], labels, points)
+    verdicts = bet_verdicts(eq[1], bets["main_head"], points)
+    return {"rows": rows, "eq": eq, "makuri": mk, "labels": labels, "bets": bets, "verdicts": verdicts}
+
+
+def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13)) -> list[dict]:
+    """その日・その場の全レースについて、判定と的中・払戻をまとめる."""
+    store = KStore()
+    target = dt.datetime.strptime(hd, "%Y%m%d").date()
+    store.prefetch([target - dt.timedelta(days=i) for i in range(1, 29)], 24)
+
+    def one(rno):
+        try:
+            info = build_race(hd, jcd, rno, result_loader=None, store=store)
+        except Exception:
+            return None
+        a = analyze_race(info, points)
+        try:
+            res = parse_result_detail(fetch_result_html(hd, jcd, rno))
+        except Exception:
+            res = None
+        combo = tuple(res[0]) if res else None
+        pay = int(res[1].replace(",", "")) if res else None
+        b = a["bets"]
+        return {
+            "rno": rno, "race_name": info.race_name,
+            "main_verdict": a["verdicts"]["main"], "ana_verdict": a["verdicts"]["ana"],
+            "main_head": b["main_head"], "ana_head": b["ana_head"],
+            "main": b["main"], "ana": b["ana"],
+            "result": combo, "pay": pay,
+            "hit_main": combo in b["main"] if combo else None,
+            "hit_ana": combo in b["ana"] if combo else None,
+        }
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        out = [x for x in ex.map(one, races) if x]
+    return sorted(out, key=lambda x: x["rno"])
+
+
 # ------------------------------------------------------------- ランキング ----
 
 def round_half_up(v: Optional[float], digits: int = 2) -> Optional[float]:

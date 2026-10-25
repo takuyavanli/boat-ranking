@@ -53,6 +53,7 @@ header[data-testid="stHeader"], #MainMenu, footer { display: none !important; }
 div[data-testid="stButtonGroup"] button { border-radius: 999px !important; background: #fff; }
 div[data-testid="stDateInput"] > div > div, div[data-testid="stDateInput"] input { background-color: #fff !important; }
 div.stButton > button[kind="primary"] { background: var(--red); border-color: var(--red); font-weight: 700; height: 3rem; }
+.st-key-odds_refresh button { height: 2.2rem !important; min-height: 2.2rem; font-size: .82rem; padding: 0 .9rem; border-radius: 999px; margin-top: -.3rem; }
 div.stButton > button[kind="secondary"] { border-color: var(--blue); color: var(--blue); background: #fff; font-weight: 700; height: 2.8rem; }
 /* レース情報 */
 .race { border: 1.5px solid var(--line); border-radius: 14px; padding: .8rem 1rem; margin-top: 1.4rem; background: #fff; }
@@ -141,6 +142,23 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .combo { display: flex; align-items: center; justify-content: center; gap: .2rem; background: #F4F9FD; border-radius: 10px; padding: .45rem .3rem; }
 .combo .lane { margin: 0; width: 1.75em; height: 1.75em; font-size: .95rem; }
 .combo .dash { color: #9fb3c6; font-weight: 700; }
+.combo .od { margin-left: .35rem; font-size: .74rem; font-weight: 700; color: #5b6b7c; font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; }
+.combo.gami { background: #FDECEE; }
+.combo.gami .od { color: var(--red); }
+.bet .oddsnote { font-size: .7rem; color: var(--red); margin-top: .45rem; }
+.bet .oddstime { font-size: .68rem; color: #7a8896; margin-left: .3rem; font-weight: 500; }
+/* 1日まとめ */
+.day { background: #fff; border: 1.5px solid var(--line); border-radius: 14px; padding: .8rem .9rem; margin-top: 1.2rem; }
+.day b.t { font-size: 1.1rem; color: var(--navy); }
+.day .sum { display: grid; grid-template-columns: 1fr; gap: .4rem; margin-top: .6rem; }
+.day .sum div { background: #F4F9FD; border-radius: 10px; padding: .5rem .65rem; font-size: .82rem; color: #1b2430; line-height: 1.5; }
+.day .sum div b { color: var(--navy); }
+.day .sum .roi { float: right; font-size: 1.05rem; font-weight: 800; color: var(--blue); }
+.day .sum .roi.low { color: #7a8896; }
+table.rk tr.dim td { opacity: .5; }
+.hit { font-weight: 800; color: var(--red); }
+.miss { color: #9aa6b2; font-weight: 700; }
+.mini .lane { width: 1.45em; height: 1.45em; font-size: .78em; margin-right: .1em; }
 .combo.dup { background: #fff; outline: 1.5px dashed #9fb3c6; outline-offset: -1.5px; }
 .bet .dupnote { font-size: .7rem; color: #6b7a89; margin-top: .45rem; }
 /* 結果 */
@@ -216,22 +234,35 @@ def pct(v):
     return "-" if v is None else f"{fmt(v, 1)}%"
 
 
-def combo_html(c, dup=False):
+def combo_html(c, dup=False, odds=None, points=8):
     sep = '<span class="dash">-</span>'
-    cls = "combo dup" if dup else "combo"
-    return f'<div class="{cls}">{sep.join(lane_chip(w) for w in c)}</div>'
+    cls = "combo"
+    if dup:
+        cls += " dup"
+    od = ""
+    if odds is not None:
+        if odds < points:
+            cls += " gami"
+        od = f'<span class="od">{odds:g}倍</span>'
+    return f'<div class="{cls}"><span>{sep.join(lane_chip(w) for w in c)}</span>{od}</div>'
 
 
-def bet_card(kind, title, tag, combos, form, note, verdict, dups=()):
+def bet_card(kind, title, tag, combos, form, note, verdict, dups=(), odds=None, points=8, otime=""):
     vtext, vkind, vnote = verdict
+    odds = odds or {}
+    gami = [c for c in combos if odds.get(c) is not None and odds[c] < points]
+    oddsnote = (f'<div class="oddsnote">赤い{len(gami)}点はオッズが{points}倍未満です（当たっても買った金額を下回ります）。</div>'
+                if gami else "")
+    otime_html = f'<span class="oddstime">オッズ {otime}時点</span>' if odds and otime else ""
     dupnote = (f'<div class="dupnote">点線の{len(dups)}点は本線と同じ組み合わせです（重ねて買う必要はありません）。</div>'
                if dups else "")
     skip = " skip" if vkind == "v-skip" else ""
     return (f'<div class="bet {kind}{skip}"><div class="bh"><span class="bt">{title}</span>'
-            f'<span class="tag">{tag}</span><span class="verdict {vkind}">{vtext}</span></div>'
+            f'<span class="tag">{tag}</span>{otime_html}<span class="verdict {vkind}">{vtext}</span></div>'
             f'<div class="form">{form}<br>{note}</div>'
             f'<div class="vnote">{vnote}</div>'
-            f'<div class="grid">{"".join(combo_html(c, c in dups) for c in combos)}</div>{dupnote}</div>')
+            f'<div class="grid">{"".join(combo_html(c, c in dups, odds.get(c), points) for c in combos)}</div>'
+            f'{oddsnote}{dupnote}</div>')
 
 
 def badge(waku, score, makuri=False):
@@ -301,6 +332,20 @@ def get_race(hd, jcd, rno):
     return bc.build_race(hd, jcd, rno, result_loader=None)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_odds(hd, jcd, rno):
+    try:
+        odds = bc.parse_odds3t(bc.fetch_odds_html(hd, jcd, rno))
+    except Exception:
+        odds = {}
+    return odds, dt.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M")
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_day(hd, jcd, points):
+    return bc.day_summary(hd, jcd, points)
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def get_result(hd, jcd, rno):
     try:
@@ -347,6 +392,82 @@ points = 8 if points_label.startswith("8") else 4
 if st.button("ランキングを出す", type="primary", width="stretch"):
     st.session_state["query"] = (hd, jcd, rno)
     st.session_state.pop("show_result", None)
+    st.session_state.pop("day_query", None)
+if st.button("この日・この会場をまとめて見る", width="stretch"):
+    st.session_state["day_query"] = (hd, jcd)
+    st.session_state.pop("query", None)
+
+day_query = st.session_state.get("day_query")
+if day_query:
+    d_hd, d_jcd = day_query
+    try:
+        with st.spinner("全レースの判定と結果を集めています（30秒ほどかかります）", show_time=True):
+            day = get_day(d_hd, d_jcd, points)
+    except Exception as e:
+        st.error(f"データを取得できませんでした。（{type(e).__name__}）")
+        st.stop()
+    dd = dt.datetime.strptime(d_hd, "%Y%m%d").date()
+
+    def tally(rows, which, pick):
+        sel = [x for x in rows if pick(x) and x["result"]]
+        n = len(sel)
+        cost = sum(len(x[which]) * 100 for x in sel)
+        hits = [x for x in sel if x["hit_" + which]]
+        ret = sum(x["pay"] for x in hits)
+        return n, len(hits), cost, ret
+
+    def sum_line(title, t):
+        n, h, cost, ret = t
+        if not n:
+            return f'<div><b>{title}</b>：対象レースなし</div>'
+        roi = ret / cost * 100
+        low = " low" if roi < 100 else ""
+        return (f'<div><span class="roi{low}">回収 {roi:.0f}%</span><b>{title}</b><br>'
+                f'{n}レース・的中 {h}・購入 {cost:,}円・払戻 {ret:,}円</div>')
+
+    buy_main = lambda x: x["main_verdict"][1] in ("v-buy", "v-ref")
+    play_ana = lambda x: x["ana_verdict"][1] == "v-play"
+    st.markdown(
+        f'<div class="day"><b class="t">{bc.VENUES[d_jcd]}　{dd.month}/{dd.day}（{WEEK[dd.weekday()]}）1日まとめ</b>'
+        f'<span class="racesub">　買い目 {points}点・1点100円</span><div class="sum">'
+        + sum_line("判定どおり本線を買った場合（◎買い・○狙い・△）", tally(day, "main", buy_main))
+        + sum_line("全レースで本線を買った場合", tally(day, "main", lambda x: True))
+        + sum_line("穴目を「遊び枠」のときだけ買った場合", tally(day, "ana", play_ana))
+        + '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    def mark(v):
+        if v is None:
+            return '<span class="miss">-</span>'
+        return '<span class="hit">○</span>' if v else '<span class="miss">×</span>'
+
+    def mini_combo(c):
+        return '<span class="mini">' + "".join(lane_chip(w) for w in c) + "</span>" if c else "未確定"
+
+    section("レースごとの結果")
+    rows_html = []
+    for x in day:
+        vtext, vkind, _ = x["main_verdict"]
+        dim = vkind == "v-skip"
+        rows_html.append(
+            ('<tr class="dim">' if dim else "<tr>")
+            + f'<td class="pos">{x["rno"]}R</td>'
+            + f'<td><span class="verdict {vkind}" style="font-size:.66rem;padding:.2em .5em">{vtext}</span></td>'
+            + f'<td class="num">{mark(x["hit_main"])}</td>'
+            + f'<td class="num">{mark(x["hit_ana"])}</td>'
+            + f'<td class="num">{mini_combo(x["result"])}</td>'
+            + f'<td class="num">{(format(x["pay"], ",") + "円") if x["pay"] else "-"}</td></tr>'
+        )
+    st.markdown(
+        '<div class="tblwrap"><table class="rk tight"><tr><th></th><th>本線の判定</th><th>本線</th><th>穴目</th>'
+        '<th>結果</th><th>払戻</th></tr>' + "".join(rows_html) + '</table></div>'
+        '<div class="note">本線・穴目の○は、アプリの買い目にその日の3連単の結果が入っていたレースです。'
+        '見送り推奨のレースは薄く表示しています。まだ終わっていないレースは「-」になります。</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(FOOT_SVG, unsafe_allow_html=True)
+    st.stop()
 
 query = st.session_state.get("query")
 if not query:
@@ -384,17 +505,21 @@ labels = {w: bc.candidate_label(w, eq_score[w], w in makuri)[1] for w in eq_scor
 
 bets = bc.suggest_bets([r["racer"].waku for r in rows], labels, points)
 section("買い目の目安（3連単）")
+if st.button("🔄 オッズを更新", key="odds_refresh"):
+    get_odds.clear()
+    st.rerun()
 main_head = bets["main_head"]
 ana_head = bets["ana_head"]
 verdicts = bc.bet_verdicts(eq_score[1], main_head, points)
+odds, otime = get_odds(q_hd, q_jcd, q_rno)
 st.markdown(
     '<div class="bets">'
     + bet_card("main", "本線", f"{points}点", bets["main"], bets["main_desc"],
                f"頭は{main_head}号艇（{bc.candidate_label(main_head, eq_score[main_head], main_head in makuri)[0]}）。2・3着は総合順位の上位から。",
-               verdicts["main"])
+               verdicts["main"], odds=odds, points=points, otime=otime)
     + bet_card("ana", "穴目", f"{points}点", bets["ana"], bets["ana_desc"],
                f"頭は{ana_head}号艇（{bc.candidate_label(ana_head, eq_score[ana_head], ana_head in makuri)[0]}）。本線の頭が外れたときの狙い。",
-               verdicts["ana"], dups=[c for c in bets["ana"] if c in bets["main"]])
+               verdicts["ana"], dups=[c for c in bets["ana"] if c in bets["main"]], odds=odds, points=points, otime=otime)
     + '</div>'
     '<div class="note">判定は、10/17〜10/24の全場1,248レースで本線・穴目の的中率と回収率（1点100円）を集計し、'
     '前半・後半の両方で同じ傾向になった条件から決めています。3連単は高配当で回収率が大きく動くので、目安として使ってください。</div>',
