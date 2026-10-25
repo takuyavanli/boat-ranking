@@ -190,6 +190,49 @@ class Racer:
     current: Series
     prev: Series = field(default_factory=Series)
     course: Optional["CourseStat"] = None   # 今回の枠と同じコースでの成績
+    motor_no: Optional[int] = None
+    motor_total2: Optional[float] = None     # モーターの期間通算2連対率 (出走表の数字)
+    motor_prev: list = field(default_factory=list)   # モーターの前節の着順 (前の使用者)
+
+    @property
+    def course_top2(self) -> Optional[float]:
+        return self.course.top2 if self.course else None
+
+    @property
+    def course_grade(self) -> Optional[str]:
+        return course_grade(self.waku, self.course_top3, self.course_top2)
+
+    @staticmethod
+    def _top2(places: list) -> tuple[int, int]:
+        n = len(places)
+        return sum(1 for p in places if p in (1, 2)), n
+
+    @property
+    def motor_cur(self) -> tuple[int, int]:
+        """モーターの今節 (この選手) の 2連対数・走数."""
+        return self._top2([r.place for r in self.current.runs if r.counted])
+
+    @property
+    def motor_prev_top2(self) -> tuple[int, int]:
+        return self._top2(self.motor_prev)
+
+    @staticmethod
+    def _rate(t):
+        return t[0] / t[1] * 100 if t[1] else None
+
+    @property
+    def motor_cur_rate(self) -> Optional[float]:
+        return self._rate(self.motor_cur)
+
+    @property
+    def motor_prev_rate(self) -> Optional[float]:
+        return self._rate(self.motor_prev_top2)
+
+    @property
+    def motor_rate(self) -> Optional[float]:
+        """モーターの2連対率 (今節+前節の合算)."""
+        a, b = self.motor_cur, self.motor_prev_top2
+        return self._rate((a[0] + b[0], a[1] + b[1]))
 
     @property
     def course_top3(self) -> Optional[float]:
@@ -298,7 +341,11 @@ def parse_racelist(html: str, hd: str, jcd: str, rno: int) -> RaceInfo:
             runs.append(Run(place=place, code=code, st=st, counted=counted))
 
         cur = Series(venue=VENUES.get(jcd, ""), start=series_start, end=target, runs=runs)
-        racers.append(Racer(waku, toban, name, klass, branch, cur))
+        racer = Racer(waku, toban, name, klass, branch, cur)
+        mm = re.match(r"(\d+)\s+([\d.]+)", r0[6].get_text(" ", strip=True)) if len(r0) > 6 else None
+        if mm:
+            racer.motor_no, racer.motor_total2 = int(mm.group(1)), float(mm.group(2))
+        racers.append(racer)
 
     racers.sort(key=lambda r: r.waku)
     return RaceInfo(
@@ -344,6 +391,7 @@ class KEntry:
     day_no: int
     race: int
     run: Run
+    motor: Optional[int] = None
 
 
 _K_LINE = re.compile(r"^\s{1,3}(\S+)\s+(\d)\s+(\d{4})\s+(.*)$")
@@ -375,12 +423,16 @@ def parse_k(text: str, day: dt.date) -> dict[str, list[KEntry]]:
             place, mark, counted = None, "失", True
         else:  # F, L など
             place, mark, counted = None, code[0], True
+        motor = None
+        mo = re.search(r"(\d+)\s+(\d+)\s+\S+\s+\d\s", rest)
+        if mo:
+            motor = int(mo.group(1))
         st = None
         sm = _K_ST.search(rest)
         if sm and counted and not sm.group(1):
             st = float(sm.group(2))
         out.setdefault(toban, []).append(
-            KEntry(day, venue, day_no, race, Run(place, mark, st, counted)))
+            KEntry(day, venue, day_no, race, Run(place, mark, st, counted), motor))
     return out
 
 
@@ -548,6 +600,7 @@ class CourseStat:
     course: int
     top3: Optional[float]   # 3連対率 (%)
     win: Optional[float]    # 1着率 (%)
+    top2: Optional[float] = None  # 2連対率 (%) = 1着率 + 2着率
 
 
 _COURSE_CACHE: dict[str, tuple[float, dict[int, CourseStat]]] = {}
@@ -576,7 +629,11 @@ def parse_course(html: str) -> dict[int, CourseStat]:
             label = tr.select_one(".table1_progress2Label")
             bars = tr.select(".table1_progress2Bar > span.is-progress")
             win = _pct(bars[0].get("style", "")) if bars else None
-            out[int(c)] = CourseStat(int(c), _pct(label.get_text() if label else ""), win)
+            second = _pct(bars[1].get("style", "")) if len(bars) > 1 else None
+            top3 = _pct(label.get_text() if label else "")
+            top2 = round(win + second, 1) if win is not None and second is not None else (
+                win if win is not None and top3 is not None else None)
+            out[int(c)] = CourseStat(int(c), top3, win, top2)
         break
     return out
 
@@ -586,12 +643,12 @@ def fetch_course(toban: str) -> Optional[dict[int, CourseStat]]:
     if hit and time.time() - hit[0] < _COURSE_TTL:
         return hit[1]
     today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
-    path = _COURSE_DIR / f"{toban}_{today:%Y%m%d}.json"
+    path = _COURSE_DIR / f"v2_{toban}_{today:%Y%m%d}.json"
     data = None
     if path.exists():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            data = {int(k): CourseStat(int(k), v[0], v[1]) for k, v in raw.items()}
+            data = {int(k): CourseStat(int(k), v[0], v[1], v[2]) for k, v in raw.items()}
         except (OSError, ValueError):
             data = None
     if data is None:
@@ -603,41 +660,65 @@ def fetch_course(toban: str) -> Optional[dict[int, CourseStat]]:
             return None
         try:
             _COURSE_DIR.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({k: [v.top3, v.win] for k, v in data.items()}), encoding="utf-8")
+            path.write_text(json.dumps({k: [v.top3, v.win, v.top2] for k, v in data.items()}), encoding="utf-8")
         except OSError:
             pass
     _COURSE_CACHE[toban] = (time.time(), data)
     return data
 
 
-# ------------------------------------------------------- 合計点からの目安 ----
-# 10/23・10/24 の全会場336レースで、合計点 (3つを同じ重み) と実際の着順を集計した結果から決めた目安.
+# -------------------------------------------------------- コースのAI評価 ----
+# 同じコースを走る選手全体 (10/17〜10/24 の出走データ) と比べて、
+# その選手のコース成績 (3連対率と2連対率の平均) がどの位置にあるかで S〜D を付ける.
+# S: 上位10%  A: 上位30%  B: 中間  C: 下位30%  D: 下位10%
 
-GUIDE = {  # (枠の区分, 点数帯) -> (1着率, 3連対率)
-    ("1", "3〜7"): (67, 89), ("1", "8〜11"): (45, 82), ("1", "12〜16"): (25, 63),
-    ("2-6", "3〜7"): (21, 68), ("2-6", "8〜11"): (9, 50), ("2-6", "12〜16"): (4, 31),
+COURSE_GRADE_TH = {  # コース: (S, A, B, C) の下限
+    1: (92.6, 86.3, 69.5, 53.1),
+    2: (68.8, 59.0, 42.4, 30.0),
+    3: (65.7, 55.5, 40.0, 28.5),
+    4: (59.4, 50.0, 34.7, 23.5),
+    5: (54.8, 43.5, 28.2, 18.7),
+    6: (45.5, 33.3, 20.0, 9.5),
 }
+GRADE_TEXT = {"S": "得意", "A": "良い", "B": "普通", "C": "やや苦手", "D": "苦手"}
+GRADE_RANGE = {"S": "上位10%", "A": "上位30%", "B": "中間", "C": "下位30%", "D": "下位10%"}
+
+
+def course_grade(course: int, top3: Optional[float], top2: Optional[float]) -> Optional[str]:
+    if top3 is None or top2 is None or course not in COURSE_GRADE_TH:
+        return None
+    v = (top3 + top2) / 2
+    s_, a_, b_, c_ = COURSE_GRADE_TH[course]
+    return "S" if v >= s_ else "A" if v >= a_ else "B" if v >= b_ else "C" if v >= c_ else "D"
+
+
+# ------------------------------------------------------- 合計点からの目安 ----
+# 10/17〜10/24 の全場1,248レースで、合計点 (3項目を同じ重み・3〜18点) と実際の着順を集計して決めた目安.
+# モーター2連対率を入れた4項目版や、コース2連対率を使う版も試したが、この3項目版がいちばん当たりやすかった.
+
+RULES = {
+    "t1a": 11,   # 1号艇: この点数以下なら 1〜2着候補
+    "t1b": 16,   # 1号艇: この点数以下なら 2〜3着候補 (それより上は消し候補)
+    "t2a": 7,    # 2〜6号艇: この点数以下なら 2〜3着候補
+    "t2b": 11,   # 2〜6号艇: この点数以下なら 3着候補 (それより上は消し候補)
+    "mk": 7,     # まくり型の点数の上限
+    "vbuy": 7,   # 本線を「買い」にする1号艇の点数の上限
+}
+
+# 目安の表: (ラベルの種類, 1号艇の条件と成績, 2〜6号艇の条件と成績). 成績は (艇数, 1着率, 2連対率, 3連対率)
+GUIDE_ROWS = [
+    ("c12", ("11点以下", (1110, 56, 73, 84)), None),
+    ("c23", ("12〜16点", (133, 29, 49, 63)), ("7点以下", (1272, 21, 46, 68))),
+    ("c3", None, ("8〜11点", (2300, 10, 29, 49))),
+    ("cx", ("17点以上（5艇のみ）", (5, 20, 40, 40)), ("12点以上", (2668, 4, 14, 27))),
+]
+
+MAKURI_GUIDE = (28, 56, 72)        # まくり型の 1着率・2連対率・3連対率 (378艇)
+MAKURI_RACE_1WIN = (57, 43)        # まくり型がいないレース / いるレースの1号艇の1着率
 
 
 def score_band(score: int) -> str:
-    return "3〜7" if score <= 7 else "8〜11" if score <= 11 else "12〜16" if score <= 16 else "17〜18"
-
-
-MAKURI_GUIDE = (31, 61, 76)  # まくり型の 1着率・2連対率・3連対率 (10/21〜10/24 の648レース)
-
-
-def makuri_wakus(racers: list[Racer], eq_score: dict[int, int]) -> set[int]:
-    """1着候補 (まくり型) の枠番を返す.
-    2〜4号艇で、合計点 (同じ重み) が7点以下、かつ平均STが内側の艇全員より0.02秒以上早い艇."""
-    by_waku = {r.waku: r for r in racers}
-    out = set()
-    for r in racers:
-        if not (2 <= r.waku <= 4) or eq_score.get(r.waku, 99) > 7 or r.total_st is None:
-            continue
-        inner = [by_waku.get(i) for i in range(1, r.waku)]
-        if all(x is None or x.total_st is None or round(x.total_st - r.total_st, 3) >= 0.02 for x in inner):
-            out.add(r.waku)
-    return out
+    return "low" if score <= RULES["t2a"] else "mid" if score <= RULES["t2b"] else "high"
 
 
 def candidate_label(waku: int, score: int, makuri: bool = False) -> tuple[str, str]:
@@ -645,16 +726,30 @@ def candidate_label(waku: int, score: int, makuri: bool = False) -> tuple[str, s
     if makuri:
         return "1着候補", "c1"
     if waku == 1:
-        if score <= 11:
+        if score <= RULES["t1a"]:
             return "1〜2着候補", "c12"
-        if score <= 16:
+        if score <= RULES["t1b"]:
             return "2〜3着候補", "c23"
         return "消し候補", "cx"
-    if score <= 7:
+    if score <= RULES["t2a"]:
         return "2〜3着候補", "c23"
-    if score <= 11:
+    if score <= RULES["t2b"]:
         return "3着候補", "c3"
     return "消し候補", "cx"
+
+
+def makuri_wakus(racers: list[Racer], eq_score: dict[int, int]) -> set[int]:
+    """1着候補 (まくり型) の枠番を返す.
+    2〜4号艇で、合計点 (同じ重み) が RULES["mk"] 以下、かつ平均STが内側の艇全員より0.02秒以上早い艇."""
+    by_waku = {r.waku: r for r in racers}
+    out = set()
+    for r in racers:
+        if not (2 <= r.waku <= 4) or eq_score.get(r.waku, 99) > RULES["mk"] or r.total_st is None:
+            continue
+        inner = [by_waku.get(i) for i in range(1, r.waku)]
+        if all(x is None or x.total_st is None or round(x.total_st - r.total_st, 3) >= 0.02 for x in inner):
+            out.add(r.waku)
+    return out
 
 
 # ------------------------------------------------------------ 買い目の目安 ----
@@ -734,29 +829,61 @@ def suggest_bets(order: list[int], labels: dict[int, str], points: int = 4) -> d
 def bet_verdicts(score1: int, main_head: int, points: int = 4) -> dict:
     """1号艇の合計点 (同じ重み)・本線の頭・点数から、本線と穴目の判定を返す.
     戻り値: {"main": (判定, 種類, 説明), "ana": (...)}"""
+    buy = score1 <= RULES["vbuy"]
     if points == 8:
-        if main_head == 1 and score1 <= 7:
-            main = ("◎ 買い", "v-buy", "このタイプの本線8点：的中44%・回収84%（650レース）")
+        if main_head == 1 and buy:
+            main = ("◎ 買い", "v-buy", "このタイプの本線8点：的中44%・回収84%（653レース）")
         elif main_head == 1:
-            main = ("見送り推奨", "v-skip", "このタイプの本線8点：的中26%・回収58%（460レース）")
+            main = ("見送り推奨", "v-skip", "このタイプの本線8点：的中26%・回収56%（457レース）")
         else:
             main = ("○ 狙い", "v-ref", "このタイプの本線8点：的中20%・回収152%（138レース）。前半・後半とも100%超えだが、レース数は少なめ")
-        if score1 <= 7:
-            ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目8点：的中26%・回収62%（650レース）")
+        if buy:
+            ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目8点：的中26%・回収62%（653レース）")
         else:
-            ana = ("遊び枠", "v-play", "このタイプの穴目8点：的中15%・回収98%（598レース）。期間で回収がぶれるので少額で")
+            ana = ("遊び枠", "v-play", "このタイプの穴目8点：的中16%・回収98%（595レース）。期間で回収がぶれるので少額で")
         return {"main": main, "ana": ana}
-    if main_head == 1 and score1 <= 7:
-        main = ("◎ 買い", "v-buy", "このタイプの本線4点：的中28%・回収93%（650レース）")
+    if main_head == 1 and buy:
+        main = ("◎ 買い", "v-buy", "このタイプの本線4点：的中28%・回収92%（653レース）")
     elif main_head == 1:
-        main = ("見送り推奨", "v-skip", "このタイプの本線4点：的中17%・回収60%（460レース）")
+        main = ("見送り推奨", "v-skip", "このタイプの本線4点：的中17%・回収60%（457レース）")
     else:
         main = ("△ 参考", "v-ref", "このタイプの本線4点：的中12%・回収196%（138レース）。高配当頼みで判断保留")
-    if score1 <= 7:
-        ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目4点：的中6%・回収64%（650レース）")
+    if buy:
+        ana = ("見送り推奨", "v-skip", "1号艇7点以下のときの穴目4点：的中6%・回収64%（653レース）")
     else:
-        ana = ("遊び枠", "v-play", "このタイプの穴目4点：的中8%・回収72%（598レース）。少額での狙いに")
+        ana = ("遊び枠", "v-play", "このタイプの穴目4点：的中8%・回収73%（595レース）。少額での狙いに")
     return {"main": main, "ana": ana}
+
+
+# --------------------------------------------------------- モーターの前節 ----
+
+def motor_prev_runs(venue: str, before: dt.date, store: KStore, max_days: int = 28) -> dict[int, list]:
+    """その場の前の節で、各モーターが走った着順を返す. {モーター番号: [着順, ...]}
+    取得済みの成績データだけで探す (待ち時間を増やさない)."""
+    def venue_entries(day):
+        return [e for es in store.cache.get(day, {}).values() for e in es if e.venue == venue]
+    day = before - dt.timedelta(days=1)
+    last = None
+    for _ in range(max_days):
+        if venue_entries(day):
+            last = day
+            break
+        day -= dt.timedelta(days=1)
+    if last is None:
+        return {}
+    out: dict[int, list] = {}
+    d = last
+    for _ in range(10):
+        es = venue_entries(d)
+        if not es:
+            break
+        for e in es:
+            if e.motor is not None and e.run.counted:
+                out.setdefault(e.motor, []).append(e.run.place)
+        if min(e.day_no for e in es) <= 1:
+            break
+        d -= dt.timedelta(days=1)
+    return out
 
 
 # ------------------------------------------------------------- ランキング ----
@@ -846,6 +973,9 @@ def build_race(hd: str, jcd: str, rno: int,
         b3 = {t: pick_prev(f.result(), start) for t, f in b3.items()}
     for r in info.racers:
         r.course = (cs.get(r.toban) or {}).get(r.waku)
+    mp = motor_prev_runs(VENUES.get(jcd, ""), start, store)
+    for r in info.racers:
+        r.motor_prev = mp.get(r.motor_no, []) if r.motor_no is not None else []
     if lost:
         store.prefetch([x.day for p in b3.values() if p for x in p.races if x.day])
         for r in lost:
