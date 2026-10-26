@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 import lzh
 
 # app.py と組み合わせが合っているかの確認用. app.py の APP_VERSION と同じにしておく.
-VERSION = "2026-10-26b"
+VERSION = "2026-10-27"
 
 UA = {"User-Agent": "Mozilla/5.0 (personal boat race stats tool)"}
 BASE = "https://www.boatrace.jp/owpc/pc/race"
@@ -64,9 +64,21 @@ def http_get(url: str) -> requests.Response:
     return r
 
 
+_RACELIST_HTML: dict[tuple[str, str, int], tuple[float, str]] = {}
+
+
 def fetch_racelist_html(hd: str, jcd: str, rno: int) -> str:
+    """出走表のHTML. 2分以内に取ったものは使い回す (先読みと本番で二重に取らない)."""
+    key = (hd, jcd, rno)
+    hit = _RACELIST_HTML.get(key)
+    if hit and time.time() - hit[0] < 120:
+        return hit[1]
     r = http_get(f"{BASE}/racelist?rno={rno}&jcd={jcd}&hd={hd}")
     r.encoding = "utf-8"
+    if len(_RACELIST_HTML) > 300:
+        for k in list(_RACELIST_HTML)[:100]:
+            _RACELIST_HTML.pop(k, None)
+    _RACELIST_HTML[key] = (time.time(), r.text)
     return r.text
 
 
@@ -953,6 +965,194 @@ def parse_odds3t(html: str) -> dict[tuple[int, int, int], Optional[float]]:
     return out
 
 
+# ------------------------------------------------------------ マイ買い目 ----
+# コース別成績の表の順位 (3連対率の順・同じ数字は枠番の若い順) で組む15点.
+#   1位-3位-2・4・5位 / 3位-1位-2・4・5位 / 2・4・5位-3位-1位
+#   4位-2位-1・3・5位 / 1・3・5位-2位-4位
+# 10/17〜10/24 の全場1,248レースで 的中26%・回収75%。1号艇が表の1〜2位のレースで 的中26%・回収79%、
+# 3位以下のレースで 的中22%・回収38%。
+
+MY_ROWS = [  # (1着, 2着, 3着) を「表の何位か」で書いたもの
+    ([1], [3], [2, 4, 5]),
+    ([3], [1], [2, 4, 5]),
+    ([2, 4, 5], [3], [1]),
+    ([4], [2], [1, 3, 5]),
+    ([1, 3, 5], [2], [4]),
+]
+
+
+def course_order(racers: list[Racer]) -> list[int]:
+    """コース別成績の表の並び (枠番の順). 3連対率の高い順、同じなら枠番の若い順."""
+    cr = rank_map({r.waku: r.course_top3 for r in racers}, higher_is_better=True, digits=1)
+    return sorted((r.waku for r in racers), key=lambda w: (cr[w], w))
+
+
+def my_bets(order: list[int]) -> list[dict]:
+    """マイ買い目の5行. 各行: {"label": "2-3-145", "rank_label": "1位-3位-2・4・5位", "combos": [...]}"""
+    pos = lambda k: order[k - 1]
+    rows = []
+    for firsts, seconds, thirds in MY_ROWS:
+        combos = [(pos(a), pos(b), pos(c)) for a in firsts for b in seconds for c in thirds]
+        lab = lambda ks: "".join(str(pos(k)) for k in ks)
+        rlab = lambda ks: "・".join(str(k) for k in ks) + "位"
+        rows.append({
+            "label": f"{lab(firsts)}-{lab(seconds)}-{lab(thirds)}",
+            "rank_label": f"{rlab(firsts)}-{rlab(seconds)}-{rlab(thirds)}",
+            "combos": combos,
+        })
+    return rows
+
+
+def my_verdict(order: list[int]) -> tuple[str, str, str]:
+    """1号艇が表の何位かで、マイ買い目が向いているレースかを返す."""
+    k = order.index(1) + 1
+    if k <= 2:
+        return ("向いている", "v-ref", f"1号艇がコース表の{k}位。このタイプは的中26%・回収79%（1,137レース）")
+    return ("不向き", "v-skip", f"1号艇がコース表の{k}位。このタイプは的中22%・回収38%（111レース）")
+
+
+# ------------------------------------------------------- 速くするための先読み ----
+# 公式サイトは海外のサーバーからだと1回の応答に数秒〜10秒かかるので、
+# 画面を待たせずに裏で先に取っておき、結果をサーバーの中に覚えておく.
+
+_VENUE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_VENUE_DIR = Path(tempfile.gettempdir()) / "boatdx_venue"
+_RACE_CACHE: dict[tuple[str, str, int], tuple[float, "RaceInfo"]] = {}
+_STORE_CACHE: dict[str, "KStore"] = {}
+_BUSY: set = set()
+_PRE_LOCK = threading.Lock()
+
+
+def open_venues_cached(hd: str, max_age: float = 3 * 3600) -> Optional[list[str]]:
+    """開催場の一覧. 取得済みならすぐ返す. まだなら None (裏で取りに行く)."""
+    hit = _VENUE_CACHE.get(hd)
+    if hit and time.time() - hit[0] < max_age:
+        return hit[1]
+    path = _VENUE_DIR / f"{hd}.json"
+    if path.exists() and time.time() - path.stat().st_mtime < max_age:
+        try:
+            codes = json.loads(path.read_text())
+            _VENUE_CACHE[hd] = (time.time(), codes)
+            return codes
+        except (OSError, ValueError):
+            pass
+    _run_once(("venue", hd), lambda: _load_venues(hd))
+    return None
+
+
+def _load_venues(hd: str) -> None:
+    try:
+        codes = parse_open_venues(fetch_index_html(hd))
+    except Exception:
+        return
+    if codes:
+        _VENUE_CACHE[hd] = (time.time(), codes)
+        try:
+            _VENUE_DIR.mkdir(parents=True, exist_ok=True)
+            (_VENUE_DIR / f"{hd}.json").write_text(json.dumps(codes))
+        except OSError:
+            pass
+
+
+def _run_once(key, fn) -> None:
+    """同じ仕事が裏で動いていなければ、裏で1回だけ動かす."""
+    with _PRE_LOCK:
+        if key in _BUSY:
+            return
+        _BUSY.add(key)
+
+    def job():
+        try:
+            fn()
+        finally:
+            with _PRE_LOCK:
+                _BUSY.discard(key)
+    threading.Thread(target=job, daemon=True).start()
+
+
+def _store_for(hd: str) -> "KStore":
+    """日付ごとに成績データの読み込み結果を使い回す (同じ日のレースは解析し直さない)."""
+    with _PRE_LOCK:
+        st = _STORE_CACHE.get(hd)
+        if st is None:
+            if len(_STORE_CACHE) > 6:
+                _STORE_CACHE.pop(next(iter(_STORE_CACHE)))
+            st = _STORE_CACHE[hd] = KStore()
+        return st
+
+
+def race_max_age(hd: str) -> float:
+    """今日のレースは今節の成績が増えていくので短め、過去のレースは長めに覚えておく."""
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y%m%d")
+    return 300 if hd >= today else 6 * 3600
+
+
+_INFLIGHT: dict = {}
+
+
+def get_race_cached(hd: str, jcd: str, rno: int) -> "RaceInfo":
+    """レースの計算結果. 覚えていればすぐ返し、裏で計算中ならそれを待つ (二重に計算しない)."""
+    from concurrent.futures import Future
+    key = (hd, jcd, rno)
+    hit = _RACE_CACHE.get(key)
+    if hit and time.time() - hit[0] < race_max_age(hd):
+        return hit[1]
+    with _PRE_LOCK:
+        fut = _INFLIGHT.get(key)
+        owner = fut is None
+        if owner:
+            fut = _INFLIGHT[key] = Future()
+    if not owner:
+        return fut.result(timeout=180)
+    try:
+        info = build_race(hd, jcd, rno, result_loader=None, store=_store_for(hd))
+        with _PRE_LOCK:
+            if len(_RACE_CACHE) > 400:
+                for k in list(_RACE_CACHE)[:100]:
+                    _RACE_CACHE.pop(k, None)
+            _RACE_CACHE[key] = (time.time(), info)
+        fut.set_result(info)
+        return info
+    except Exception as e:
+        fut.set_exception(e)
+        raise
+    finally:
+        with _PRE_LOCK:
+            _INFLIGHT.pop(key, None)
+
+
+def prefetch_race(hd: str, jcd: str, rno: int) -> None:
+    """レースを選んだ時点で、そのレースを最優先で裏で計算しておく."""
+    _run_once(("race", hd, jcd, rno), lambda: _safe(lambda: get_race_cached(hd, jcd, rno)))
+
+
+def _safe(fn):
+    try:
+        fn()
+    except Exception:
+        pass
+
+
+def prefetch_venue(hd: str, jcd: str) -> None:
+    """会場を選んだ時点で、その日の全レースを裏で先に計算しておく.
+    1) 12レース分の出走表をまとめて取り、2) 出てくる選手全員のコース別成績をまとめて取り、
+    3) そのあと各レースを計算する (通信をまとめて同時に行うので、1レースずつより速い)."""
+    def work():
+        def racelist(rno):
+            try:
+                return parse_racelist(fetch_racelist_html(hd, jcd, rno), hd, jcd, rno)
+            except Exception:
+                return None
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            infos = [x for x in ex.map(racelist, range(1, 13)) if x]
+        tobans = sorted({r.toban for info in infos for r in info.racers})
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            list(ex.map(fetch_course, tobans))
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(lambda rno: _safe(lambda: get_race_cached(hd, jcd, rno)), range(1, 13)))
+    _run_once(("venue_races", hd, jcd), work)
+
+
 # ---------------------------------------------------------------- 1日まとめ ----
 
 def analyze_race(info: RaceInfo, points: int = 8) -> dict:
@@ -963,7 +1163,10 @@ def analyze_race(info: RaceInfo, points: int = 8) -> dict:
     labels = {w: candidate_label(w, eq[w], w in mk)[1] for w in eq}
     bets = suggest_bets([x["racer"].waku for x in rows], labels, points)
     verdicts = bet_verdicts(eq[1], bets["main_head"], points)
-    return {"rows": rows, "eq": eq, "makuri": mk, "labels": labels, "bets": bets, "verdicts": verdicts}
+    corder = course_order(info.racers)
+    my = [c for row in my_bets(corder) for c in row["combos"]]
+    return {"rows": rows, "eq": eq, "makuri": mk, "labels": labels, "bets": bets, "verdicts": verdicts,
+            "my": my, "my_verdict": my_verdict(corder)}
 
 
 def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13)) -> list[dict]:
@@ -974,7 +1177,7 @@ def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13))
 
     def one(rno):
         try:
-            info = build_race(hd, jcd, rno, result_loader=None, store=store)
+            info = get_race_cached(hd, jcd, rno)
         except Exception:
             return None
         a = analyze_race(info, points)
@@ -993,6 +1196,8 @@ def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13))
             "result": combo, "pay": pay,
             "hit_main": combo in b["main"] if combo else None,
             "hit_ana": combo in b["ana"] if combo else None,
+            "my": a["my"], "my_verdict": a["my_verdict"],
+            "hit_my": combo in a["my"] if combo else None,
         }
 
     with ThreadPoolExecutor(max_workers=6) as ex:
@@ -1105,6 +1310,8 @@ def build_race(hd: str, jcd: str, rno: int,
 
 
 def warm_up(days: int = 28) -> None:
-    """アプリを開いた時点で、直近の成績データを先に集めておく."""
+    """アプリを開いた時点で、開催場の一覧と直近の成績データを先に集めておく."""
     today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
+    for d in (today, today + dt.timedelta(days=1)):
+        open_venues_cached(d.strftime("%Y%m%d"))
     KStore().prefetch([today - dt.timedelta(days=i) for i in range(1, days + 1)], 24)

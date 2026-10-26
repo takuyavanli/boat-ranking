@@ -16,7 +16,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # boat_core.py と組み合わせが合っているかの確認用 (boat_core.VERSION と同じにしておく)
-APP_VERSION = "2026-10-26b"
+APP_VERSION = "2026-10-27"
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
 SHOW_ST_MARK = False
@@ -128,6 +128,18 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .bet { background: #fff; border: 1.5px solid var(--line); border-radius: 14px; padding: .75rem .85rem .8rem; }
 .bet.main { border-color: #F3B3B8; }
 .bet.ana { border-color: #C9D6E6; }
+.bet.my { border-color: #FFE27A; }
+.bet.my .tag { background: var(--yellow); color: var(--navy); }
+.myrow { margin-top: .55rem; }
+.myrow .mh { font-size: .82rem; font-weight: 800; color: var(--navy); }
+.myrow .mh span { font-weight: 500; color: #7a8896; font-size: .7rem; margin-left: .3rem; }
+.myrow .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: .35rem; margin-top: .25rem; }
+.mc { background: #F4F9FD; border-radius: 10px; padding: .35rem .15rem .3rem; text-align: center; }
+.mc .lane { width: 1.45em; height: 1.45em; font-size: .8rem; margin: 0; }
+.mc .dash { color: #9fb3c6; font-weight: 700; margin: 0 .05rem; }
+.mc .od { display: block; font-size: .7rem; color: #5b6b7c; font-weight: 700; margin-top: .15rem; }
+.mc.gami { background: #FDECEE; }
+.mc.gami .od { color: var(--red); }
 .bet .bh { display: flex; align-items: center; gap: .5rem; margin-bottom: .35rem; }
 .bet .bt { font-weight: 800; font-size: 1rem; color: var(--navy); }
 .bet .tag { font-size: .7rem; font-weight: 800; padding: .25em .6em; border-radius: 999px; }
@@ -259,6 +271,32 @@ def combo_html(c, dup=False, odds=None, points=8):
     return f'<div class="{cls}"><span>{sep.join(lane_chip(w) for w in c)}</span>{od}</div>'
 
 
+def my_card(rows, verdict, odds, otime):
+    vtext, vkind, vnote = verdict
+    odds = odds or {}
+    sep = '<span class="dash">-</span>'
+    n = sum(len(r["combos"]) for r in rows)
+    gami = 0
+    body = ""
+    for r in rows:
+        cells = ""
+        for c in r["combos"]:
+            o = odds.get(c)
+            g = o is not None and o < n
+            gami += g
+            od = f'<span class="od">{o:g}倍</span>' if o is not None else ""
+            cells += f'<div class="mc{" gami" if g else ""}">{sep.join(lane_chip(w) for w in c)}{od}</div>'
+        body += (f'<div class="myrow"><div class="mh">{r["label"]}<span>（{r["rank_label"]}）</span></div>'
+                 f'<div class="g3">{cells}</div></div>')
+    gnote = (f'<div class="oddsnote">赤い{gami}点はオッズが{n}倍未満です（当たっても買った金額を下回ります）。</div>'
+             if gami else "")
+    otime_html = f'<span class="oddstime">オッズ {otime}時点</span>' if odds and otime else ""
+    return (f'<div class="bet my{" skip" if vkind == "v-skip" else ""}"><div class="bh"><span class="bt">マイ買い目</span>'
+            f'<span class="tag">{n}点</span>{otime_html}<span class="verdict {vkind}">{vtext}</span></div>'
+            f'<div class="form">コース別成績の表の順位で組む型。1位と3位、2位と4位を組にして、6位は消し。</div>'
+            f'<div class="vnote">{vnote}</div>{body}{gnote}</div>')
+
+
 def bet_card(kind, title, tag, combos, form, note, verdict, dups=(), odds=None, points=8, otime=""):
     vtext, vkind, vnote = verdict
     odds = odds or {}
@@ -331,17 +369,9 @@ def table(headers, rows, top_first=False, cls=""):
 
 # ------------------------------------------------------------- データ取得 ----
 
-@st.cache_data(ttl=3 * 3600, show_spinner=False)
-def open_venues(hd):
-    try:
-        return bc.parse_open_venues(bc.fetch_index_html(hd))
-    except Exception:
-        return []
-
-
-@st.cache_data(ttl=90, show_spinner=False)
 def get_race(hd, jcd, rno):
-    return bc.build_race(hd, jcd, rno, result_loader=None)
+    # 会場を選んだ時点で裏で先に計算している結果があれば、それをすぐ使う
+    return bc.get_race_cached(hd, jcd, rno)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -387,24 +417,41 @@ st.markdown('<div class="lbl">日付</div>', unsafe_allow_html=True)
 day = st.date_input("日付", value=today, format="YYYY/MM/DD", label_visibility="collapsed")
 hd = day.strftime("%Y%m%d")
 
-codes = open_venues(hd) or list(bc.VENUES)
+# 開催場の一覧は裏で取りに行き、まだ届いていないときは全場を出しておく (画面を待たせない)
+open_codes = bc.open_venues_cached(hd)
+codes = open_codes or list(bc.VENUES)
 st.markdown('<div class="lbl">会場</div>', unsafe_allow_html=True)
+if open_codes is None:
+    @st.fragment(run_every=2)
+    def wait_venues():
+        # 開催場の一覧が届いたら画面を描き直す
+        if bc.open_venues_cached(hd) is not None:
+            st.rerun()
+        st.caption("開催場を確認中です。少しすると開催している場だけになります。")
+    wait_venues()
+
+
+def on_venue_pick():
+    st.session_state["venue_picked"] = True
+
+
 jcd = st.pills("会場", codes, default=codes[0], label_visibility="collapsed",
-               format_func=lambda c: bc.VENUES[c], key="venue") or codes[0]
+               format_func=lambda c: bc.VENUES[c], key="venue", on_change=on_venue_pick) or codes[0]
+if st.session_state.get("venue_picked") and (open_codes is None or jcd in open_codes):
+    bc.prefetch_venue(hd, jcd)   # 選んだ会場の全レースを裏で先に計算しておく
 
 st.markdown('<div class="lbl">レース</div>', unsafe_allow_html=True)
+def on_race_pick():
+    st.session_state["race_picked"] = True
+
+
 rno = st.pills("レース", list(range(1, 13)), default=1, label_visibility="collapsed",
-               format_func=lambda n: f"{n}R") or 1
+               format_func=lambda n: f"{n}R", key="race", on_change=on_race_pick) or 1
+if st.session_state.get("race_picked") and (open_codes is None or jcd in open_codes):
+    bc.prefetch_race(hd, jcd, rno)   # 選んだレースを最優先で裏で計算しておく
 
-st.markdown('<div class="lbl">総合順位の重み</div>', unsafe_allow_html=True)
-weight_label = st.radio("総合順位の重み", ["3つを同じ重みで", "得点率を2倍重視"], horizontal=True,
-                        label_visibility="collapsed")
-rate_weight = 2 if weight_label.startswith("得点率を2倍") else 1
-
-st.markdown('<div class="lbl">買い目の点数</div>', unsafe_allow_html=True)
-points_label = st.radio("買い目の点数", ["4点ずつ", "8点ずつ", "12点ずつ"], index=1, horizontal=True,
-                        label_visibility="collapsed")
-points = int(points_label.split("点")[0])
+rate_weight = 1   # 総合順位は3項目を同じ重みで足す
+points = 8        # 1日まとめの内部計算用 (画面には出さない)
 
 if st.button("ランキングを出す", type="primary", width="stretch"):
     st.session_state["query"] = (hd, jcd, rno)
@@ -442,14 +489,11 @@ if day_query:
         return (f'<div><span class="roi{low}">回収 {roi:.0f}%</span><b>{title}</b><br>'
                 f'{n}レース・的中 {h}・購入 {cost:,}円・払戻 {ret:,}円</div>')
 
-    buy_main = lambda x: x["main_verdict"][1] in ("v-buy", "v-ref")
-    play_ana = lambda x: x["ana_verdict"][1] == "v-play"
     st.markdown(
         f'<div class="day"><b class="t">{bc.VENUES[d_jcd]}　{dd.month}/{dd.day}（{WEEK[dd.weekday()]}）1日まとめ</b>'
-        f'<span class="racesub">　買い目 {points}点・1点100円</span><div class="sum">'
-        + sum_line("判定どおり本線を買った場合（◎買い・○狙い・△）", tally(day, "main", buy_main))
-        + sum_line("全レースで本線を買った場合", tally(day, "main", lambda x: True))
-        + sum_line("穴目を「遊び枠」のときだけ買った場合", tally(day, "ana", play_ana))
+        f'<span class="racesub">　マイ買い目15点・1点100円</span><div class="sum">'
+        + sum_line("「向いている」レースだけ買った場合", tally(day, "my", lambda x: x["my_verdict"][1] != "v-skip"))
+        + sum_line("全レース買った場合", tally(day, "my", lambda x: True))
         + '</div></div>',
         unsafe_allow_html=True,
     )
@@ -465,22 +509,21 @@ if day_query:
     section("レースごとの結果")
     rows_html = []
     for x in day:
-        vtext, vkind, _ = x["main_verdict"]
+        vtext, vkind, _ = x["my_verdict"]
         dim = vkind == "v-skip"
         rows_html.append(
             ('<tr class="dim">' if dim else "<tr>")
             + f'<td class="pos">{x["rno"]}R</td>'
             + f'<td><span class="verdict {vkind}" style="font-size:.66rem;padding:.2em .5em">{vtext}</span></td>'
-            + f'<td class="num">{mark(x["hit_main"])}</td>'
-            + f'<td class="num">{mark(x["hit_ana"])}</td>'
+            + f'<td class="num">{mark(x["hit_my"])}</td>'
             + f'<td class="num">{mini_combo(x["result"])}</td>'
             + f'<td class="num">{(format(x["pay"], ",") + "円") if x["pay"] else "-"}</td></tr>'
         )
     st.markdown(
-        '<div class="tblwrap"><table class="rk tight"><tr><th></th><th>本線の判定</th><th>本線</th><th>穴目</th>'
+        '<div class="tblwrap"><table class="rk tight"><tr><th></th><th>判定</th><th>的中</th>'
         '<th>結果</th><th>払戻</th></tr>' + "".join(rows_html) + '</table></div>'
-        '<div class="note">本線・穴目の○は、アプリの買い目にその日の3連単の結果が入っていたレースです。'
-        '見送り推奨のレースは薄く表示しています。まだ終わっていないレースは「-」になります。</div>',
+        '<div class="note">的中の○は、マイ買い目15点にその日の3連単の結果が入っていたレースです。'
+        '「不向き」のレースは薄く表示しています。まだ終わっていないレースは「-」になります。</div>',
         unsafe_allow_html=True,
     )
     st.markdown(FOOT_SVG, unsafe_allow_html=True)
@@ -520,27 +563,18 @@ labels = {w: bc.candidate_label(w, eq_score[w], w in makuri)[1] for w in eq_scor
 
 # --------------------------------------------------------------- 買い目 ----
 
-bets = bc.suggest_bets([r["racer"].waku for r in rows], labels, points)
-section("買い目の目安（3連単）")
+section("買い目（3連単）")
 if st.button("🔄 オッズを更新", key="odds_refresh"):
     get_odds.clear()
     st.rerun()
-main_head = bets["main_head"]
-ana_head = bets["ana_head"]
-verdicts = bc.bet_verdicts(eq_score[1], main_head, points)
 odds, otime, odds_err = get_odds(q_hd, q_jcd, q_rno)
+corder = bc.course_order(info.racers)
+my_rows = bc.my_bets(corder)
 st.markdown(
-    '<div class="bets">'
-    + bet_card("main", "本線", f"{points}点", bets["main"], bets["main_desc"],
-               f"頭は{main_head}号艇（{bc.candidate_label(main_head, eq_score[main_head], main_head in makuri)[0]}）。2・3着は総合順位の上位から。",
-               verdicts["main"], odds=odds, points=points, otime=otime)
-    + bet_card("ana", "穴目", f"{points}点", bets["ana"], bets["ana_desc"],
-               f"頭は{ana_head}号艇（{bc.candidate_label(ana_head, eq_score[ana_head], ana_head in makuri)[0]}）。本線の頭が外れたときの狙い。",
-               verdicts["ana"], dups=[c for c in bets["ana"] if c in bets["main"]], odds=odds, points=points, otime=otime)
-    + '</div>'
+    '<div class="bets">' + my_card(my_rows, bc.my_verdict(corder), odds, otime) + '</div>'
     + (f'<div class="note" style="color:#E60012">オッズを取得できませんでした（{odds_err}）。「オッズを更新」で取り直せます。</div>' if odds_err else '')
-    + '<div class="note">判定は、10/17〜10/24の全場1,248レースで本線・穴目の的中率と回収率（1点100円）を集計し、'
-    '前半・後半の両方で同じ傾向になった条件から決めています。3連単は高配当で回収率が大きく動くので、目安として使ってください。</div>',
+    + '<div class="note">マイ買い目の成績は、10/17〜10/24の全場1,248レースで集計した目安です（全体で的中26%・回収75%）。'
+    '3連単は高配当で回収率が大きく動きます。</div>',
     unsafe_allow_html=True,
 )
 
@@ -564,8 +598,7 @@ st.markdown(
     '<div class="note">得点率・平均STは今節と前節を合わせた全走です。コースAI評価は、今回の枠と同じコースの3連対率・2連対率を、'
     'そのコースを走る選手全体と比べて自動で判定したもの（S 上位10%・A 上位30%・B 中間・C 下位30%・D 下位10%）。'
     'その下の順位はコース3連対率の順位で、合計点にはこの順位を使っています。'
-    + ("得点率の順位×2＋STの順位＋コースの順位" if rate_weight == 2 else "3つの順位の合計")
-    + "が小さい順に並べています。</div>",
+    '3つの順位の合計が小さい順に並べています。</div>',
     unsafe_allow_html=True,
 )
 
