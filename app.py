@@ -4,6 +4,7 @@
 """
 
 import datetime as dt
+import importlib
 import threading
 import unicodedata
 from decimal import ROUND_HALF_UP, Decimal
@@ -229,10 +230,20 @@ st.markdown(
 
 
 if getattr(bc, "VERSION", None) != APP_VERSION:
+    # GitHub を更新しても、サーバーが古い boat_core.py を覚えたままのことがあるので、読み込み直してみる
+    try:
+        import lzh
+        importlib.reload(lzh)
+        bc = importlib.reload(bc)
+    except Exception:
+        pass
+if getattr(bc, "VERSION", None) != APP_VERSION:
     st.error(
         "app.py と boat_core.py の版が合っていません。"
-        "GitHub に、zip の中の app.py・boat_core.py・lzh.py の3つをまとめて上書きしてください。"
-        f"（app.py: {APP_VERSION} ／ boat_core.py: {getattr(bc, 'VERSION', '古い版')}）"
+        f"（app.py: {APP_VERSION} ／ boat_core.py: {getattr(bc, 'VERSION', '古い版')}）\n\n"
+        "1. GitHub で boat_core.py を開き、上の方の VERSION の行が app.py と同じ日付か確認してください。"
+        "違っていたら、zip の中の boat_core.py をアップロードし直してください。\n\n"
+        "2. 同じ日付になっているのにこの表示が出る場合は、share.streamlit.io の管理画面で「Reboot app」を押してください。"
     )
     st.stop()
 
