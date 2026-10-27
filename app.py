@@ -17,7 +17,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # boat_core.py と組み合わせが合っているかの確認用 (boat_core.VERSION と同じにしておく)
-APP_VERSION = "2026-10-27"
+APP_VERSION = "2026-10-27b"
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
 SHOW_ST_MARK = False
@@ -129,6 +129,8 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .bet { background: #fff; border: 1.5px solid var(--line); border-radius: 14px; padding: .75rem .85rem .8rem; }
 .bet.main { border-color: #F3B3B8; }
 .bet.ana { border-color: #C9D6E6; }
+.bet.best { border-color: #8FC8EC; border-width: 2px; }
+.bet.best .tag { background: var(--blue); color: #fff; }
 .bet.my { border-color: #FFE27A; }
 .bet.my .tag { background: var(--yellow); color: var(--navy); }
 .myrow { margin-top: .55rem; }
@@ -143,6 +145,8 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .mc.gami .od { color: var(--red); }
 .bet .bh { display: flex; align-items: center; gap: .5rem; margin-bottom: .35rem; }
 .bet .bt { font-weight: 800; font-size: 1rem; color: var(--navy); }
+.bet .bh { flex-wrap: wrap; row-gap: .3rem; }
+.bet .bt, .bet .tag, .bet .oddstime { white-space: nowrap; }
 .bet .tag { font-size: .7rem; font-weight: 800; padding: .25em .6em; border-radius: 999px; }
 .bet.main .tag { background: var(--red); color: #fff; }
 .bet.ana .tag { background: var(--navy); color: var(--yellow); }
@@ -502,9 +506,9 @@ if day_query:
 
     st.markdown(
         f'<div class="day"><b class="t">{bc.VENUES[d_jcd]}　{dd.month}/{dd.day}（{WEEK[dd.weekday()]}）1日まとめ</b>'
-        f'<span class="racesub">　マイ買い目15点・1点100円</span><div class="sum">'
-        + sum_line("「向いている」レースだけ買った場合", tally(day, "my", lambda x: x["my_verdict"][1] != "v-skip"))
-        + sum_line("全レース買った場合", tally(day, "my", lambda x: True))
+        f'<span class="racesub">　1点100円</span><div class="sum">'
+        + sum_line("ベスト6点を全レース買った場合", tally(day, "best6", lambda x: True))
+        + sum_line("マイ買い目15点を全レース買った場合", tally(day, "my", lambda x: True))
         + '</div></div>',
         unsafe_allow_html=True,
     )
@@ -520,21 +524,23 @@ if day_query:
     section("レースごとの結果")
     rows_html = []
     for x in day:
-        vtext, vkind, _ = x["my_verdict"]
-        dim = vkind == "v-skip"
+        strong = x["best6_type"].startswith("1号艇が強い")
         rows_html.append(
-            ('<tr class="dim">' if dim else "<tr>")
+            "<tr>"
             + f'<td class="pos">{x["rno"]}R</td>'
-            + f'<td><span class="verdict {vkind}" style="font-size:.66rem;padding:.2em .5em">{vtext}</span></td>'
+            + f'<td><span class="verdict {"v-buy" if strong else "v-ref"}" style="font-size:.64rem;padding:.2em .5em">'
+            + ("1号艇強" if strong else "弱め") + '</span></td>'
+            + f'<td class="num">{mark(x["hit_best6"])}</td>'
             + f'<td class="num">{mark(x["hit_my"])}</td>'
             + f'<td class="num">{mini_combo(x["result"])}</td>'
             + f'<td class="num">{(format(x["pay"], ",") + "円") if x["pay"] else "-"}</td></tr>'
         )
     st.markdown(
-        '<div class="tblwrap"><table class="rk tight"><tr><th></th><th>判定</th><th>的中</th>'
+        '<div class="tblwrap"><table class="rk tight"><tr><th></th><th>型</th><th>6点</th><th>マイ</th>'
         '<th>結果</th><th>払戻</th></tr>' + "".join(rows_html) + '</table></div>'
-        '<div class="note">的中の○は、マイ買い目15点にその日の3連単の結果が入っていたレースです。'
-        '「不向き」のレースは薄く表示しています。まだ終わっていないレースは「-」になります。</div>',
+        '<div class="note">6点・マイの○は、ベスト6点・マイ買い目15点にその日の3連単の結果が入っていたレースです。'
+        '型は、1号艇が7点以下なら「1号艇強」、8点以上なら「弱め」です。'
+        'まだ終わっていないレースは「-」になります。</div>',
         unsafe_allow_html=True,
     )
     st.markdown(FOOT_SVG, unsafe_allow_html=True)
@@ -581,13 +587,23 @@ if st.button("🔄 オッズを更新", key="odds_refresh"):
 odds, otime, odds_err = get_odds(q_hd, q_jcd, q_rno)
 corder = bc.course_order(info.racers)
 my_rows = bc.my_bets(corder)
+b6 = bc.best6([r["racer"].waku for r in rows], corder, eq_score[1])
 st.markdown(
-    '<div class="bets">' + my_card(my_rows, bc.my_verdict(corder), odds, otime) + '</div>'
+    '<div class="bets">'
+    + bet_card("best", "ベスト6点", "6点", b6["combos"], b6["desc"],
+               "過去8日分（全場1,248レース）でよく出た並びから、レースの種類ごとに選んだ6点。",
+               (b6["type"], b6["kind"], b6["note"]), odds=odds, points=6, otime=otime)
+    + '</div>'
     + (f'<div class="note" style="color:#E60012">オッズを取得できませんでした（{odds_err}）。「オッズを更新」で取り直せます。</div>' if odds_err else '')
-    + '<div class="note">マイ買い目の成績は、10/17〜10/24の全場1,248レースで集計した目安です（全体で的中26%・回収75%）。'
-    '3連単は高配当で回収率が大きく動きます。</div>',
+    + '<div class="note">ベスト6点は全体で的中31%・回収90%（前半93%・後半86%）。3連単は高配当で回収率が大きく動くので、目安として使ってください。</div>',
     unsafe_allow_html=True,
 )
+with st.expander("マイ買い目（15点）も見る"):
+    st.markdown(
+        '<div class="bets">' + my_card(my_rows, bc.my_verdict(corder), odds, otime) + '</div>'
+        '<div class="note">マイ買い目は全体で的中26%・回収75%（前半57%・後半94%）。</div>',
+        unsafe_allow_html=True,
+    )
 
 section("総合順位")
 table(

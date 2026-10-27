@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 import lzh
 
 # app.py と組み合わせが合っているかの確認用. app.py の APP_VERSION と同じにしておく.
-VERSION = "2026-10-27"
+VERSION = "2026-10-27b"
 
 UA = {"User-Agent": "Mozilla/5.0 (personal boat race stats tool)"}
 BASE = "https://www.boatrace.jp/owpc/pc/race"
@@ -1153,6 +1153,35 @@ def prefetch_venue(hd: str, jcd: str) -> None:
     _run_once(("venue_races", hd, jcd), work)
 
 
+# -------------------------------------------------------------- ベスト6点 ----
+# 10/17〜10/24 の全場1,248レースで「よく出る並び」を調べ、前半・後半の両方で当たった形を使う.
+#   1号艇が7点以下 (強い) → 1号艇が頭、2・3着は総合順位の上位3艇 (1号艇を除く) の6点
+#       653レースで 的中36%・回収89% (前半92%・後半86%)
+#   1号艇が8点以上 → コース別成績の表の順位で 1-2-3, 1-2-4, 1-3-2, 1-2-5, 1-4-2, 2-1-3 の6点
+#       595レースで 的中25%・回収91% (前半95%・後半86%)
+#   全体: 的中31%・回収90% (前半93%・後半86%)
+
+BEST6_COURSE = [(1, 2, 3), (1, 2, 4), (1, 3, 2), (1, 2, 5), (1, 4, 2), (2, 1, 3)]
+
+
+def best6(order: list[int], corder: list[int], score1: int) -> dict:
+    """ベスト6点. order は総合順位の並び、corder はコース表の並び (どちらも枠番)."""
+    if score1 <= RULES["vbuy"]:
+        others = [w for w in order if w != 1][:3]
+        combos = [(1, a, b) for a in others for b in others if a != b]
+        return {
+            "type": "1号艇が強い", "kind": "v-buy", "combos": combos,
+            "desc": f"1着 <b>1</b>　2・3着 <b>{'・'.join(map(str, others))}</b>（総合順位の上位3艇）",
+            "note": "このタイプ：的中36%・回収89%（653レース・前半92%／後半86%）",
+        }
+    combos = [tuple(corder[i - 1] for i in p) for p in BEST6_COURSE]
+    return {
+        "type": "1号艇が弱め", "kind": "v-ref", "combos": combos,
+        "desc": "コース表の順位で 1-2-3・1-2-4・1-3-2・1-2-5・1-4-2・2-1-3",
+        "note": "このタイプ：的中25%・回収91%（595レース・前半95%／後半86%）",
+    }
+
+
 # ---------------------------------------------------------------- 1日まとめ ----
 
 def analyze_race(info: RaceInfo, points: int = 8) -> dict:
@@ -1165,8 +1194,9 @@ def analyze_race(info: RaceInfo, points: int = 8) -> dict:
     verdicts = bet_verdicts(eq[1], bets["main_head"], points)
     corder = course_order(info.racers)
     my = [c for row in my_bets(corder) for c in row["combos"]]
+    b6 = best6([x["racer"].waku for x in rows], corder, eq[1])
     return {"rows": rows, "eq": eq, "makuri": mk, "labels": labels, "bets": bets, "verdicts": verdicts,
-            "my": my, "my_verdict": my_verdict(corder)}
+            "my": my, "my_verdict": my_verdict(corder), "best6": b6}
 
 
 def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13)) -> list[dict]:
@@ -1198,6 +1228,8 @@ def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13))
             "hit_ana": combo in b["ana"] if combo else None,
             "my": a["my"], "my_verdict": a["my_verdict"],
             "hit_my": combo in a["my"] if combo else None,
+            "best6": a["best6"]["combos"], "best6_type": a["best6"]["type"],
+            "hit_best6": combo in a["best6"]["combos"] if combo else None,
         }
 
     with ThreadPoolExecutor(max_workers=6) as ex:
