@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 import lzh
 
 # app.py と組み合わせが合っているかの確認用. app.py の APP_VERSION と同じにしておく.
-VERSION = "2026-10-27b"
+VERSION = "2026-10-27c"
 
 UA = {"User-Agent": "Mozilla/5.0 (personal boat race stats tool)"}
 BASE = "https://www.boatrace.jp/owpc/pc/race"
@@ -1237,6 +1237,91 @@ def day_summary(hd: str, jcd: str, points: int = 8, races: range = range(1, 13))
     return sorted(out, key=lambda x: x["rno"])
 
 
+# ---------------------------------------------------------------- 直前情報 ----
+# 展示タイム・スタート展示 (進入・展示ST). 締切の30分前ごろに公式サイトに出る.
+# 10/17〜10/24 の1,231レースで調べた結果:
+#   ・展示タイムの順位を半分の重みで総合順位に足すと、総合1位の1着率 38.7%→40.3%、上位3艇ボックス 21.4%→22.3% (前半・後半とも改善)
+#   ・展示STの順位をそのまま足すと悪くなるので、展示STは「攻めの目印」にだけ使う
+#   ・まくり注意      3・4コースで、展示STが内側の全艇より0.05秒以上速く、展示タイム3番目以内 → 1着19% (通常12%)
+#   ・差し注意        2コースで、展示タイム1〜2番目、3コースの展示STが1コースより0.03秒以上速い → 1着22% (通常15%)
+#   ・まくり差し注意  3・4コースで、すぐ内より0.03秒以上速い (内側全艇より0.05秒以上ではない)、展示タイム1〜2番目 → 1着16% (通常12%)
+#   ・1号艇注意       1コースの展示タイムが5〜6番目 → 1着40% (通常53%)
+
+EXH_WEIGHT = 0.5
+
+
+def fetch_beforeinfo_html(hd: str, jcd: str, rno: int) -> str:
+    r = http_get(f"{BASE}/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}")
+    r.encoding = "utf-8"
+    return r.text
+
+
+def parse_beforeinfo(html: str) -> dict[int, dict]:
+    """{枠番: {"exh": 展示タイム, "course": 展示の進入コース, "st": 展示ST (Fはマイナス), "stF": bool}}.
+    まだ展示が終わっていないときは空の dict."""
+    s = BeautifulSoup(html, "html.parser")
+    res: dict[int, dict] = {}
+    for t in s.select("div.table1 table"):
+        head = t.get_text(" ", strip=True)
+        if "展示 タイム" in head or "展示タイム" in head:
+            for tb in t.select("tbody"):
+                tds = tb.find_all("tr")[0].find_all("td")
+                if len(tds) > 4:
+                    w = _norm(tds[0].get_text()).translate(Z2H)
+                    if w.isdigit():
+                        try:
+                            res.setdefault(int(w), {})["exh"] = float(tds[4].get_text(strip=True))
+                        except ValueError:
+                            pass
+        if "スタート展示" in head:
+            for c, row in enumerate(t.select("div.table1_boatImage1"), 1):
+                n = row.select_one(".table1_boatImage1Number")
+                stx = row.select_one(".table1_boatImage1Time")
+                if not n:
+                    continue
+                w = _norm(n.get_text()).translate(Z2H)
+                if not w.isdigit():
+                    continue
+                res.setdefault(int(w), {})["course"] = c
+                m = re.search(r"(F|L)?\.?(\d\d)", _norm(stx.get_text()) if stx else "")
+                if m:
+                    v = float("0." + m.group(2))
+                    res[int(w)]["st"] = -v if m.group(1) == "F" else v
+                    res[int(w)]["stF"] = m.group(1) == "F"
+    ok = [w for w, v in res.items() if "exh" in v and "st" in v and "course" in v]
+    return res if len(ok) == len(res) and len(ok) >= 5 else {}
+
+
+def exh_ranks(before: dict[int, dict]) -> dict[int, int]:
+    return rank_map({w: v["exh"] for w, v in before.items()}, higher_is_better=False)
+
+
+def attack_flags(before: dict[int, dict]) -> dict[int, str]:
+    """直前情報から、攻めの目印を付ける. {枠番: "まくり注意" など}"""
+    if not before:
+        return {}
+    exr = exh_ranks(before)
+    by_course = {v["course"]: w for w, v in before.items()}
+    st = {w: v["st"] for w, v in before.items()}
+    out: dict[int, str] = {}
+    for w, v in before.items():
+        c = v["course"]
+        inner = [by_course[k] for k in range(1, c) if k in by_course]
+        d_inner = (min(st[i] for i in inner) - st[w]) if inner else None
+        d_next = (st[inner[-1]] - st[w]) if inner else None
+        if c in (3, 4) and d_inner is not None and d_inner >= 0.05 and exr[w] <= 3:
+            out[w] = "まくり注意"
+        elif (c == 2 and exr[w] <= 2 and 1 in by_course and 3 in by_course
+              and st[by_course[1]] - st[by_course[3]] >= 0.03):
+            out[w] = "差し注意"
+        elif (c in (3, 4) and d_next is not None and d_next >= 0.03
+              and d_inner is not None and d_inner < 0.05 and exr[w] <= 2):
+            out[w] = "まくり差し注意"
+        elif c == 1 and exr[w] >= 5:
+            out[w] = "1号艇注意" if w == 1 else "イン注意"
+    return out
+
+
 # ------------------------------------------------------------- ランキング ----
 
 def round_half_up(v: Optional[float], digits: int = 2) -> Optional[float]:
@@ -1267,8 +1352,9 @@ def rank_map(values: dict[int, Optional[float]], higher_is_better: bool,
     return ranks
 
 
-def overall(racers: list[Racer], rate_weight: int = 1) -> list[dict]:
-    """得点率・平均ST・コース別3連対率の順位を合計して並べる."""
+def overall(racers: list[Racer], rate_weight: int = 1, exh_rank: Optional[dict[int, int]] = None) -> list[dict]:
+    """得点率・平均ST・コース別3連対率の順位を合計して並べる.
+    exh_rank (展示タイムの順位) を渡すと、その半分を足す (直前情報が出たあと)."""
     rr = rank_map({r.waku: r.total_rate for r in racers}, higher_is_better=True)
     sr = rank_map({r.waku: r.total_st for r in racers}, higher_is_better=False)
     cr = rank_map({r.waku: r.course_top3 for r in racers}, higher_is_better=True, digits=1)
@@ -1279,7 +1365,9 @@ def overall(racers: list[Racer], rate_weight: int = 1) -> list[dict]:
             "rate_rank": rr[r.waku],
             "st_rank": sr[r.waku],
             "course_rank": cr[r.waku],
-            "score": rr[r.waku] * rate_weight + sr[r.waku] + cr[r.waku],
+            "exh_rank": exh_rank.get(r.waku) if exh_rank else None,
+            "score": rr[r.waku] * rate_weight + sr[r.waku] + cr[r.waku]
+                     + (EXH_WEIGHT * exh_rank.get(r.waku, 6) if exh_rank else 0),
         })
     rows.sort(key=lambda x: (x["score"], -(x["racer"].total_rate or -1), x["racer"].waku))
     for i, row in enumerate(rows, 1):

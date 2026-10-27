@@ -17,7 +17,7 @@ import boat_core as bc
 st.set_page_config(page_title="ボートレースDX", page_icon="🚤", layout="centered")
 
 # boat_core.py と組み合わせが合っているかの確認用 (boat_core.VERSION と同じにしておく)
-APP_VERSION = "2026-10-27b"
+APP_VERSION = "2026-10-27c"
 
 # 消し候補 (2〜6号艇・12点以上) で平均STが1〜3位の艇に、平均STの欄で目印を出すか
 SHOW_ST_MARK = False
@@ -129,6 +129,11 @@ table.rk td.name .k { font-size: .7rem; color: #7a8896; font-weight: 500; }
 .bet { background: #fff; border: 1.5px solid var(--line); border-radius: 14px; padding: .75rem .85rem .8rem; }
 .bet.main { border-color: #F3B3B8; }
 .bet.ana { border-color: #C9D6E6; }
+.flag { display: inline-block; font-size: .66rem; font-weight: 800; padding: .1em .45em; border-radius: 5px; margin: .15rem .2rem 0 0; white-space: nowrap; }
+.flag.f-makuri { background: #FFE3E6; color: #C4001A; }
+.flag.f-sashi { background: #E2F1FF; color: #0058A3; }
+.flag.f-mz { background: #F1E6FF; color: #6B2FB3; }
+.flag.f-in { background: #FFF1D6; color: #9A5B00; }
 .bet.best { border-color: #8FC8EC; border-width: 2px; }
 .bet.best .tag { background: var(--blue); color: #fff; }
 .bet.my { border-color: #FFE27A; }
@@ -402,6 +407,22 @@ def get_odds(hd, jcd, rno):
     return odds, now, ""
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_before(hd, jcd, rno):
+    """直前情報 (展示タイム・スタート展示). まだ出ていなければ空."""
+    try:
+        return bc.parse_beforeinfo(bc.fetch_beforeinfo_html(hd, jcd, rno))
+    except Exception:
+        return {}
+
+
+FLAG_CLASS = {"まくり注意": "f-makuri", "差し注意": "f-sashi", "まくり差し注意": "f-mz", "1号艇注意": "f-in", "イン注意": "f-in"}
+
+
+def flag_html(text):
+    return f'<span class="flag {FLAG_CLASS.get(text, "f-in")}">{text}</span>' if text else ""
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def get_day(hd, jcd, points):
     return bc.day_summary(hd, jcd, points)
@@ -573,7 +594,11 @@ st.markdown(
 
 # ---------------------------------------------------------------- 総合順位 ----
 
-rows = bc.overall(info.racers, rate_weight=rate_weight)
+before = get_before(q_hd, q_jcd, q_rno)
+exr = bc.exh_ranks(before) if before else None
+flags = bc.attack_flags(before)
+order3 = [x["racer"].waku for x in bc.overall(info.racers, rate_weight=1)]   # 3項目だけの並び (ベスト6点用)
+rows = bc.overall(info.racers, rate_weight=rate_weight, exh_rank=exr)
 eq_score = {x["racer"].waku: x["score"] for x in bc.overall(info.racers, rate_weight=1)}
 makuri = bc.makuri_wakus(info.racers, eq_score)
 labels = {w: bc.candidate_label(w, eq_score[w], w in makuri)[1] for w in eq_score}
@@ -581,13 +606,14 @@ labels = {w: bc.candidate_label(w, eq_score[w], w in makuri)[1] for w in eq_scor
 # --------------------------------------------------------------- 買い目 ----
 
 section("買い目（3連単）")
-if st.button("🔄 オッズを更新", key="odds_refresh"):
+if st.button("🔄 オッズ・直前情報を更新", key="odds_refresh"):
     get_odds.clear()
+    get_before.clear()
     st.rerun()
 odds, otime, odds_err = get_odds(q_hd, q_jcd, q_rno)
 corder = bc.course_order(info.racers)
 my_rows = bc.my_bets(corder)
-b6 = bc.best6([r["racer"].waku for r in rows], corder, eq_score[1])
+b6 = bc.best6(order3, corder, eq_score[1])
 st.markdown(
     '<div class="bets">'
     + bet_card("best", "ベスト6点", "6点", b6["combos"], b6["desc"],
@@ -607,17 +633,18 @@ with st.expander("マイ買い目（15点）も見る"):
 
 section("総合順位")
 table(
-    ["", "選手", "得点率", "平均ST", "コースAI評価", "合計"],
+    ["", "選手", "得点率", "平均ST", "コースAI評価"] + (["展示"] if exr else []) + ["合計"],
     [[
         f'<td class="pos">{r["rank"]}</td>',
         f'<td class="name">{lane_chip(r["racer"].waku)}{r["racer"].name}'
         f'<div class="meta">{badge(r["racer"].waku, eq_score[r["racer"].waku], r["racer"].waku in makuri)}'
-        f'<span class="k">{r["racer"].klass}</span></div></td>',
+        f'<span class="k">{r["racer"].klass}</span></div>{flag_html(flags.get(r["racer"].waku))}</td>',
         stacked(fmt(r["racer"].total_rate), r["rate_rank"]),
         stacked(fmt(r["racer"].total_st), r["st_rank"],
                 SHOW_ST_MARK and r["racer"].waku != 1 and labels[r["racer"].waku] == "cx" and r["st_rank"] <= 3),
         grade_cell(r["racer"].course_grade, r["course_rank"]),
-        f'<td class="num"><b>{r["score"]}</b></td>',
+    ] + ([stacked(f'{before[r["racer"].waku]["exh"]:.2f}', r["exh_rank"])] if exr else []) + [
+        f'<td class="num"><b>{r["score"]:g}</b></td>',
     ] for r in rows],
     top_first=True, cls="tight",
 )
@@ -625,7 +652,10 @@ st.markdown(
     '<div class="note">得点率・平均STは今節と前節を合わせた全走です。コースAI評価は、今回の枠と同じコースの3連対率・2連対率を、'
     'そのコースを走る選手全体と比べて自動で判定したもの（S 上位10%・A 上位30%・B 中間・C 下位30%・D 下位10%）。'
     'その下の順位はコース3連対率の順位で、合計点にはこの順位を使っています。'
-    '3つの順位の合計が小さい順に並べています。</div>',
+    + ('直前情報が出ているので、3つの順位に「展示タイムの順位×0.5」を足した合計が小さい順に並べています。'
+       '目安ラベル・★1着候補・ベスト6点は、展示を入れない3項目の合計で判定しています。</div>'
+       if exr else
+       '3つの順位の合計が小さい順に並べています。直前情報（締切30分前ごろ）が出ると、展示タイムの順位も合計に入ります。</div>'),
     unsafe_allow_html=True,
 )
 
@@ -661,6 +691,37 @@ st.markdown(
 )
 
 # ------------------------------------------------------------------ 得点率 ----
+
+section("直前情報")
+if before:
+    by_course = sorted(before, key=lambda w: before[w]["course"])
+    name_of = {r.waku: r.name for r in info.racers}
+    table(
+        ["進入", "選手", "展示タイム", "展示ST", "目印"],
+        [[
+            f'<td class="pos">{before[w]["course"]}</td>',
+            f'<td class="name">{lane_chip(w)}{name_of.get(w, "")}</td>',
+            stacked(f'{before[w]["exh"]:.2f}', exr[w]),
+            f'<td class="num">{("F" if before[w].get("stF") else "")}{abs(before[w]["st"]):.2f}</td>',
+            f'<td>{flag_html(flags.get(w))}</td>',
+        ] for w in by_course],
+        cls="tight",
+    )
+    st.markdown(
+        '<div class="note">進入はスタート展示のコースです。目印は、10/17〜10/24の1,231レースで調べた条件です。'
+        '<br>・まくり注意：3・4コースで、展示STが内側の全艇より0.05秒以上速く、展示タイム3番目以内（1着19%、通常12%）'
+        '<br>・差し注意：2コースで、展示タイム1〜2番目、3コースの展示STが1コースより0.03秒以上速い（1着22%、通常15%）'
+        '<br>・まくり差し注意：3・4コースで、すぐ内より0.03秒以上速く、展示タイム1〜2番目（1着16%、通常12%）'
+        '<br>・1号艇注意：1コースの展示タイムが5〜6番目（1着40%、通常53%）</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div class="note">直前情報（展示タイム・スタート展示）はまだ出ていません。締切の30分前ごろに出るので、'
+        '出たら「🔄 オッズ・直前情報を更新」を押してください。</div>',
+        unsafe_allow_html=True,
+    )
+
 
 section("得点率")
 rr = bc.rank_map({r.waku: r.total_rate for r in info.racers}, higher_is_better=True)
